@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Q4季度人员绩效对比分析系统 - 企业管理平台</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <!-- 办公软件顶部导航栏 -->
+        <nav class="office-nav">
+            <div class="nav-left">
+                <span class="company-logo">◈</span>
+                <span class="system-name">企业资源管理系统 v3.2.1</span>
+            </div>
+            <div class="nav-center">
+                <a href="#" class="nav-item active" onclick="showSection('game')">绩效分析</a>
+                <a href="#" class="nav-item" onclick="showSection('admin')">人员配置</a>
+            </div>
+            <div class="nav-right">
+                <span class="user-info">管理员</span>
+                <span class="date-display" id="current-date"></span>
+            </div>
+        </nav>
+
+        <header>
+            <h1 class="title">
+                Q4季度人员绩效对比分析
+            </h1>
+            <p class="subtitle">资源配置 · 团队组建 · 绩效模拟</p>
+        </header>
+
+        <!-- 游戏阶段指示器 -->
+        <div class="phase-indicator">
+            <div class="phase active" id="phase-select">
+                <div class="phase-number">1</div>
+                <div class="phase-text">资源配置</div>
+            </div>
+            <div class="phase-connector"></div>
+            <div class="phase" id="phase-battle">
+                <div class="phase-number">2</div>
+                <div class="phase-text">绩效评估</div>
+            </div>
+            <div class="debug-btn-container">
+                <button class="debug-btn" onclick="autoFillRosters()">一键选人</button>
+            </div>
+        </div>
+
+        <!-- 玩家信息面板 -->
+        <div class="players-panel">
+            <!-- 玩家1 -->
+            <div class="player-section player1" id="player1-section">
+                <div class="player-header">
+                    <div class="player-icon">A</div>
+                    <input type="text" class="player-name-input" id="player1-name" value="A组" maxlength="10" onchange="updatePlayerName(1, this.value)">
+                    <div class="budget-display">
+                        <span class="budget-label">剩余预算</span>
+                        <span class="budget-value" id="player1-budget">11</span>
+                    </div>
+                </div>
+                <div class="used-teams-display">
+                    <span class="used-teams-label">已选部门:</span>
+                    <span class="used-teams-list" id="player1-used-teams"></span>
+                </div>
+                <div class="roster" id="player1-roster">
+                    <div class="roster-slot" data-position="PG">
+                        <span class="position-label">1项目</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                    <div class="roster-slot" data-position="SG">
+                        <span class="position-label">2技术</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                    <div class="roster-slot" data-position="SF">
+                        <span class="position-label">3运营</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                    <div class="roster-slot" data-position="PF">
+                        <span class="position-label">4市场</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                    <div class="roster-slot" data-position="C">
+                        <span class="position-label">5财务</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 当前回合指示 -->
+            <div class="turn-indicator" id="turn-indicator">
+                <div class="turn-display">
+                    <div class="current-turn">当前操作</div>
+                    <div class="turn-player" id="current-player">A组</div>
+                    <div class="pick-info">
+                        <span>第</span>
+                        <span id="round-number">1</span>
+                        <span>轮</span>
+                    </div>
+                    <div class="phase-hint" id="phase-text">选择部门</div>
+                </div>
+            </div>
+
+            <!-- 玩家2 -->
+            <div class="player-section player2" id="player2-section">
+                <div class="player-header">
+                    <div class="player-icon">B</div>
+                    <input type="text" class="player-name-input" id="player2-name" value="B组" maxlength="10" onchange="updatePlayerName(2, this.value)">
+                    <div class="budget-display">
+                        <span class="budget-label">剩余预算</span>
+                        <span class="budget-value" id="player2-budget">11</span>
+                    </div>
+                </div>
+                <div class="used-teams-display">
+                    <span class="used-teams-label">已选部门:</span>
+                    <span class="used-teams-list" id="player2-used-teams"></span>
+                </div>
+                <div class="roster" id="player2-roster">
+                    <div class="roster-slot" data-position="PG">
+                        <span class="position-label">1项目</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                    <div class="roster-slot" data-position="SG">
+                        <span class="position-label">2技术</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                    <div class="roster-slot" data-position="SF">
+                        <span class="position-label">3运营</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                    <div class="roster-slot" data-position="PF">
+                        <span class="position-label">4市场</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                    <div class="roster-slot" data-position="C">
+                        <span class="position-label">5财务</span>
+                        <span class="player-name empty">待分配</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 位置选择器 -->
+        <div class="position-selector hidden" id="position-selector">
+            <div class="selector-content">
+                <h3>分配岗位</h3>
+                <p id="selected-player-name">为 员工 分配岗位</p>
+                <div class="position-buttons" id="position-buttons"></div>
+                <button class="cancel-btn" onclick="cancelSelection()">取消</button>
+            </div>
+        </div>
+
+        <!-- 选择区域 -->
+        <div class="selection-area" id="selection-area">
+            <!-- 队伍选择区域 -->
+            <div class="team-select-area" id="team-select-area">
+                <div class="section-header">
+                    <h3>选择业务部门</h3>
+                    <p>点击选择部门，或点击随机分配</p>
+                    <button class="random-btn" onclick="randomDrawTeam()">随机分配</button>
+                </div>
+                <div class="teams-grid" id="teams-grid">
+                    <!-- 动态生成 -->
+                </div>
+            </div>
+
+            <!-- 球员选择区域 -->
+            <div class="player-select-area hidden" id="player-select-area">
+                <div class="section-header">
+                    <h3 id="drawn-team-name">部门名称</h3>
+                    <p>选择一名员工加入团队（按绩效评级计算）</p>
+                    <button class="redraw-btn" onclick="redrawTeam()">重新抽取</button>
+                    <button class="skip-btn" onclick="skipPick()">跳过本轮</button>
+                </div>
+                
+                <!-- 自定义球员输入 -->
+                <div class="custom-player-input">
+                    <div class="custom-input-header">
+                        <span class="custom-badge">添加外包人员</span>
+                        <span class="custom-hint">输入任意员工信息，按基础评级计算</span>
+                    </div>
+                    <div class="custom-input-form">
+                        <input type="text" id="custom-season" placeholder="入职年份 (如: 2015)" class="custom-input season-input">
+                        <input type="text" id="custom-name" placeholder="姓名 (如: 张三)" class="custom-input name-input">
+                        <input type="text" id="custom-name-en" placeholder="工号 (如: EMP001)" class="custom-input name-en-input">
+                        <select id="custom-score" class="custom-input score-select" style="width: 80px;">
+                            <option value="1">1分</option>
+                            <option value="2">2分</option>
+                            <option value="3">3分</option>
+                            <option value="4">4分</option>
+                            <option value="5">5分</option>
+                            <option value="6">6分</option>
+                        </select>
+                        <select id="custom-position" class="custom-input position-select">
+                            <option value="">选择岗位</option>
+                            <option value="PG">1项目</option>
+                            <option value="SG">2技术</option>
+                            <option value="SF">3运营</option>
+                            <option value="PF">4市场</option>
+                            <option value="C">5财务</option>
+                        </select>
+                        <button class="custom-add-btn" onclick="addCustomPlayer()">添加</button>
+                    </div>
+                </div>
+                
+                <div class="players-list" id="team-players-list">
+                    <!-- 动态生成 -->
+                </div>
+            </div>
+        </div>
+
+        <!-- 对战区域 -->
+        <div class="battle-area hidden" id="battle-area">
+            <div class="battle-header">
+                <h2>季度绩效对比评估 BO7</h2>
+                <div class="series-score">
+                    <div class="team-score">
+                        <span class="team-name" id="battle-player1-name">A组</span>
+                        <span class="score" id="team1-wins">0</span>
+                    </div>
+                    <span class="vs">VS</span>
+                    <div class="team-score">
+                        <span class="team-name" id="battle-player2-name">B组</span>
+                        <span class="score" id="team2-wins">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="teams-display">
+                <div class="team team1">
+                    <h3 id="battle-roster1-title">A组人员配置</h3>
+                    <div class="team-roster" id="battle-roster1"></div>
+                    <div class="team-stats">
+                        <div class="stat">
+                            <span class="stat-label">总评分</span>
+                            <span class="stat-value" id="team1-total">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="game-log" id="game-log">
+                    <h3>评估报告</h3>
+                    <div class="log-content" id="log-content"></div>
+                </div>
+
+                <div class="team team2">
+                    <h3 id="battle-roster2-title">B组人员配置</h3>
+                    <div class="team-roster" id="battle-roster2"></div>
+                    <div class="team-stats">
+                        <div class="stat">
+                            <span class="stat-label">总评分</span>
+                            <span class="stat-value" id="team2-total">0</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="battle-controls">
+                <button class="battle-btn" id="simulate-btn" onclick="simulateSeries()">
+                    开始绩效评估
+                </button>
+                <button class="battle-btn secondary" id="restart-btn" onclick="restartGame()">
+                    重新配置
+                </button>
+            </div>
+
+            <div class="champion-display hidden" id="champion-display">
+                <div class="champion-content">
+                    <div class="trophy">★</div>
+                    <h2 id="champion-name">优秀团队</h2>
+                    <div class="confetti-container" id="confetti"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- AI提示词显示面板 -->
+        <div class="prompt-panel hidden" id="prompt-panel">
+            <div class="prompt-panel-header">
+                <h3>分析日志</h3>
+                <button class="prompt-toggle-btn" onclick="togglePromptPanel()">收起</button>
+            </div>
+            <div class="prompt-panel-content" id="prompt-panel-content">
+                <div class="prompt-section">
+                    <h4>系统配置</h4>
+                    <pre id="system-prompt-display" class="prompt-text"></pre>
+                </div>
+                <div class="prompt-section">
+                    <h4>输入参数</h4>
+                    <pre id="user-prompt-display" class="prompt-text"></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- 提示消息 -->
+        <div class="toast hidden" id="toast">
+            <span class="toast-message"></span>
+        </div>
+    </div>
+
+    <!-- 球员管理界面（悬浮窗口） -->
+    <div id="admin-section" class="admin-modal" style="display: none;">
+        <div class="admin-modal-content">
+            <div class="admin-header">
+                <h2>球员数据管理</h2>
+                <div class="admin-header-actions">
+                    <button class="btn-primary" onclick="showAddPlayerForm()">➕ 添加新球员</button>
+                    <button class="btn-close" onclick="closeAdminPanel()">&times;</button>
+                </div>
+            </div>
+        
+        <div class="admin-filters">
+            <select id="admin-team-filter" onchange="filterAdminPlayers()">
+                <option value="">所有球队</option>
+            </select>
+            <input type="text" id="admin-search" placeholder="搜索球员姓名..." oninput="filterAdminPlayers()">
+        </div>
+
+        <div class="admin-table-container">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>姓名</th>
+                        <th>英文名</th>
+                        <th>球队</th>
+                        <th>位置</th>
+                        <th>成本</th>
+                        <th>全明星</th>
+                        <th>MVP</th>
+                        <th>FMVP</th>
+                        <th>总冠军</th>
+                        <th>巅峰赛季</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="admin-table-body">
+                </tbody>
+            </table>
+        </div>
+        </div>
+    </div>
+
+    <!-- 添加/编辑球员模态窗口 -->
+    <div id="player-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">添加球员</h3>
+                <span class="close" onclick="closePlayerModal()">&times;</span>
+            </div>
+            <form id="player-form" onsubmit="savePlayer(event)">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>中文名 *</label>
+                        <input type="text" id="form-name" required>
+                    </div>
+                    <div class="form-group">
+                        <label>英文名 *</label>
+                        <input type="text" id="form-nameEn" required>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>球队 *</label>
+                        <select id="form-team" required>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>成本 *</label>
+                        <select id="form-cost" required>
+                            <option value="1">1分</option>
+                            <option value="2">2分</option>
+                            <option value="3">3分</option>
+                            <option value="4">4分</option>
+                            <option value="5">5分</option>
+                            <option value="6">6分</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>位置 *（按住Ctrl多选）</label>
+                        <select id="form-positions" multiple required style="height: 80px;">
+                            <option value="PG">控球后卫 (PG)</option>
+                            <option value="SG">得分后卫 (SG)</option>
+                            <option value="SF">小前锋 (SF)</option>
+                            <option value="PF">大前锋 (PF)</option>
+                            <option value="C">中锋 (C)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>巅峰赛季 *</label>
+                        <input type="text" id="form-peakSeason" placeholder="例如：1995-96" required>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>全明星次数</label>
+                        <input type="number" id="form-allStar" min="0" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label>MVP次数</label>
+                        <input type="number" id="form-mvp" min="0" value="0">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>FMVP次数</label>
+                        <input type="number" id="form-fmvp" min="0" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label>总冠军次数</label>
+                        <input type="number" id="form-championships" min="0" value="0">
+                    </div>
+                </div>
+                <input type="hidden" id="form-playerId">
+                <div class="form-actions">
+                    <button type="button" class="btn-secondary" onclick="closePlayerModal()">取消</button>
+                    <button type="submit" class="btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="players.js"></script>
+    <script src="script.js"></script>
+    <script>
+        // 显示当前日期
+        document.getElementById('current-date').textContent = new Date().toLocaleDateString('zh-CN');
+    </script>
+</body>
+</html>

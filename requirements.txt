@@ -1,0 +1,5 @@
+# NBA历史球星模拟对战 - Python依赖
+flask>=2.3.0
+flask-cors>=4.0.0
+openai>=1.0.0
+
