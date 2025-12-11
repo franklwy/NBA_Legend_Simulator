@@ -1,6 +1,17 @@
-# 🏀 NBA 历史球星模拟对战 / 球员数据管理
+---
+title: NBA Legend Simulator
+emoji: 🏀
+colorFrom: orange
+colorTo: red
+sdk: docker
+pinned: false
+license: mit
+---
+
+# 🏀 NBA 历史球星模拟对战 / NBA Legend Simulator
 
 一个基于 Flask + 纯前端的 NBA 球星选人、对战模拟与球员数据管理工具。
+使用 DeepSeek V3 Reasoner 进行智能比赛模拟。
 
 ## ✨ 主要特性
 
@@ -24,7 +35,15 @@
 
 ## 🚀 快速开始
 
-### 方式一：启动后端（推荐）
+### 在 Hugging Face Space 上使用
+**重要配置：** 在 Space Settings 中添加环境变量：
+- `DEEPSEEK_API_KEY`: 您的 DeepSeek API Key（从 https://platform.deepseek.com/ 获取）
+
+配置完成后，应用会自动部署并可以使用。
+
+### 本地运行
+
+#### 方式一：启动后端（推荐）
 ```powershell
 # 进入项目
 cd NBA
@@ -38,9 +57,9 @@ $env:DEEPSEEK_API_KEY = "your-api-key"
 # 启动
 python server.py
 ```
-然后浏览器访问 `http://localhost:5000`。
+然后浏览器访问 `http://localhost:7860`。
 
-### 方式二：纯前端模式
+#### 方式二：纯前端模式
 直接用浏览器打开 `index.html`（无后端持久化；球员管理保存不可用）。
 
 ## 🔄 双模式切换

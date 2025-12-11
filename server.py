@@ -11,12 +11,16 @@ import re
 from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
 from openai import OpenAI
+from dotenv import load_dotenv
 
 # 确保日志立即输出（禁用缓冲）
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
 
 # 获取当前脚本所在目录
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 加载 .env（不覆盖已有环境变量）
+load_dotenv(os.path.join(SCRIPT_DIR, '.env'), override=False)
 
 app = Flask(__name__, static_folder='.')
 CORS(app)
@@ -564,12 +568,13 @@ def update_player(player_id):
 
 
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 7860))
     print("=" * 50)
     print("NBA历史球星模拟对战 - 服务器启动")
     print("=" * 50)
     print(f"API Key: {'已配置' if DEEPSEEK_API_KEY != 'your-api-key-here' else '未配置'}")
-    print("访问地址: http://localhost:5000")
+    print(f"访问地址: http://0.0.0.0:{port}")
     print("=" * 50)
     
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
 
