@@ -21,8 +21,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder='.')
 CORS(app)
 
-# DeepSeek API 配置
-DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
+# DeepSeek API 配置（不要在代码中硬编码密钥）
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # 创建不使用代理的HTTP客户端

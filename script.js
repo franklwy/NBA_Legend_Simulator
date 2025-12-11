@@ -6,6 +6,358 @@
 // API配置
 const API_BASE_URL = 'http://localhost:5000';
 
+// ========================================
+// 显示模式配置
+// ========================================
+let displayMode = localStorage.getItem('displayMode') || 'office'; // 'office' 或 'nba'
+
+// 术语映射表
+const terminology = {
+    office: {
+        // 页面标题
+        pageTitle: 'Q4季度人员绩效对比分析系统 - 企业管理平台',
+        mainTitle: 'Q4季度人员绩效对比分析',
+        subtitle: '资源配置 · 团队组建 · 绩效模拟',
+        
+        // 导航栏
+        systemName: '企业资源管理系统 v3.2.1',
+        nav1: '绩效分析',
+        nav2: '人员配置',
+        userRole: '管理员',
+        
+        // 阶段指示器
+        phase1: '资源配置',
+        phase2: '绩效评估',
+        
+        // 玩家面板
+        defaultPlayer1: 'A组',
+        defaultPlayer2: 'B组',
+        budgetLabel: '剩余预算',
+        usedTeamsLabel: '已选部门:',
+        emptySlot: '待分配',
+        
+        // 位置名称
+        position: {
+            PG: '1项目',
+            SG: '2技术',
+            SF: '3运营',
+            PF: '4市场',
+            C: '5财务'
+        },
+        
+        // 回合指示器
+        currentTurn: '当前操作',
+        roundText: '轮',
+        phaseHint: '选择部门',
+        
+        // 选择区域
+        teamSelectTitle: '选择业务部门',
+        teamSelectHint: '点击选择部门，或点击随机分配',
+        randomBtn: '随机分配',
+        teamCount: '名人员',
+        
+        // 球员选择
+        playerSelectHint: '选择一名员工加入团队（按绩效评级计算）',
+        redrawBtn: '重新抽取',
+        skipBtn: '跳过本轮',
+        customBadge: '添加外包人员',
+        customHint: '输入任意员工信息，按基础评级计算',
+        customSeasonPlaceholder: '入职年份 (如: 2015)',
+        customNamePlaceholder: '姓名 (如: 张三)',
+        customNameEnPlaceholder: '工号 (如: EMP001)',
+        
+        // 对战区域
+        battleTitle: '季度绩效对比评估 BO7',
+        rosterTitle: '人员配置',
+        totalLabel: '总评分',
+        gameLog: '评估报告',
+        simulateBtn: '开始绩效评估',
+        restartBtn: '重新配置',
+        championTitle: '优秀团队',
+        
+        // 管理面板
+        adminTitle: '球员数据管理',
+        
+        // 消息提示
+        positionAssign: '分配岗位',
+        positionAssignHint: '为 {name} 分配岗位',
+        
+        // 其他
+        cost: '分',
+        championship: '冠',
+        allStar: '次全明星',
+        mvp: 'MVP',
+        peak: '巅峰:',
+        
+        // 动态文本
+        teamUsed: '该部门已被分配',
+        teamSelected: '部门',
+        noTeamsAvailable: '没有可用的部门了',
+        playerUsed: '该员工已被分配',
+        enterPlayerName: '请输入员工姓名',
+        redrawTeamToast: '重新选择部门',
+        assignPersonnel: '分配人员',
+        bestEmployee: '季度最佳员工',
+        bestEmployeeBadge: '最佳员工',
+        
+        // 阶段提示
+        phaseDrawTeam: '选择部门',
+        phasePickPlayer: '分配人员'
+    },
+    nba: {
+        // 页面标题
+        pageTitle: 'NBA历史球星模拟对战游戏',
+        mainTitle: 'NBA历史球星模拟对战',
+        subtitle: '组队 · 对战 · 称霸',
+        
+        // 导航栏
+        systemName: 'NBA历史球星对战系统 v1.0',
+        nav1: '开始游戏',
+        nav2: '球员管理',
+        userRole: '玩家',
+        
+        // 阶段指示器
+        phase1: '选择球员',
+        phase2: '模拟对战',
+        
+        // 玩家面板
+        defaultPlayer1: '玩家1',
+        defaultPlayer2: '玩家2',
+        budgetLabel: '剩余预算',
+        usedTeamsLabel: '已选球队:',
+        emptySlot: '未选择',
+        
+        // 位置名称
+        position: {
+            PG: '控球后卫',
+            SG: '得分后卫',
+            SF: '小前锋',
+            PF: '大前锋',
+            C: '中锋'
+        },
+        
+        // 回合指示器
+        currentTurn: '当前回合',
+        roundText: '轮',
+        phaseHint: '抽取球队',
+        
+        // 选择区域
+        teamSelectTitle: '选择NBA球队',
+        teamSelectHint: '点击选择球队，或点击随机抽取',
+        randomBtn: '随机抽取',
+        teamCount: '名球员',
+        
+        // 球员选择
+        playerSelectHint: '选择一名球员加入阵容',
+        redrawBtn: '重新抽取',
+        skipBtn: '跳过本轮',
+        customBadge: '自定义球员',
+        customHint: '输入任意球员信息，按基础评分计算',
+        customSeasonPlaceholder: '赛季 (如: 2015-16)',
+        customNamePlaceholder: '姓名 (如: 张伟)',
+        customNameEnPlaceholder: '英文名 (如: Zhang Wei)',
+        
+        // 对战区域
+        battleTitle: 'NBA对战模拟 BO7',
+        rosterTitle: '阵容',
+        totalLabel: '总评分',
+        gameLog: '比赛日志',
+        simulateBtn: '开始对战',
+        restartBtn: '重新开始',
+        championTitle: '冠军',
+        
+        // 管理面板
+        adminTitle: '球员数据管理',
+        
+        // 消息提示
+        positionAssign: '分配位置',
+        positionAssignHint: '为 {name} 分配位置',
+        
+        // 其他
+        cost: '分',
+        championship: '冠',
+        allStar: '次全明星',
+        mvp: 'MVP',
+        peak: '巅峰:',
+        
+        // 动态文本
+        teamUsed: '该球队已被选择',
+        teamSelected: '球队',
+        noTeamsAvailable: '没有可用的球队了',
+        playerUsed: '该球员已被选择',
+        enterPlayerName: '请输入球员姓名',
+        redrawTeamToast: '重新抽取球队',
+        assignPersonnel: '选择球员',
+        bestEmployee: '总决赛MVP',
+        bestEmployeeBadge: 'FMVP',
+        
+        // 阶段提示
+        phaseDrawTeam: '抽取球队',
+        phasePickPlayer: '选择球员'
+    }
+};
+
+// 获取当前术语
+function getTerms() {
+    return terminology[displayMode];
+}
+
+// 切换显示模式
+function toggleDisplayMode() {
+    displayMode = displayMode === 'office' ? 'nba' : 'office';
+    localStorage.setItem('displayMode', displayMode);
+    applyDisplayMode();
+}
+
+// 应用显示模式
+function applyDisplayMode() {
+    const terms = getTerms();
+    
+    // 更新页面标题
+    document.title = terms.pageTitle;
+    
+    // 更新主标题
+    const mainTitle = document.querySelector('.title');
+    if (mainTitle) mainTitle.textContent = terms.mainTitle;
+    
+    const subtitle = document.querySelector('.subtitle');
+    if (subtitle) subtitle.textContent = terms.subtitle;
+    
+    // 更新导航栏
+    const systemName = document.querySelector('.system-name');
+    if (systemName) systemName.textContent = terms.systemName;
+    
+    const navItems = document.querySelectorAll('.nav-item');
+    if (navItems[0]) navItems[0].textContent = terms.nav1;
+    if (navItems[1]) navItems[1].textContent = terms.nav2;
+    
+    const userInfo = document.querySelector('.user-info');
+    if (userInfo) userInfo.textContent = terms.userRole;
+    
+    // 更新模式切换按钮
+    const modeToggleBtn = document.getElementById('mode-toggle-btn');
+    if (modeToggleBtn) {
+        const icon = modeToggleBtn.querySelector('.mode-icon');
+        const text = modeToggleBtn.querySelector('.mode-text');
+        if (displayMode === 'office') {
+            icon.textContent = '🏀';
+            text.textContent = '切换为NBA模式';
+        } else {
+            icon.textContent = '💼';
+            text.textContent = '切换为办公模式';
+        }
+    }
+    
+    // 更新阶段指示器
+    const phase1Text = document.querySelector('#phase-select .phase-text');
+    const phase2Text = document.querySelector('#phase-battle .phase-text');
+    if (phase1Text) phase1Text.textContent = terms.phase1;
+    if (phase2Text) phase2Text.textContent = terms.phase2;
+    
+    // 更新预算标签
+    document.querySelectorAll('.budget-label').forEach(el => {
+        el.textContent = terms.budgetLabel;
+    });
+    
+    // 更新已选部门/球队标签
+    document.querySelectorAll('.used-teams-label').forEach(el => {
+        el.textContent = terms.usedTeamsLabel;
+    });
+    
+    // 更新位置标签
+    updatePositionLabels();
+    
+    // 更新回合指示器
+    const currentTurnEl = document.querySelector('.current-turn');
+    if (currentTurnEl) currentTurnEl.textContent = terms.currentTurn;
+    
+    // 更新选择区域
+    const teamSelectTitle = document.querySelector('#team-select-area .section-header h3');
+    if (teamSelectTitle) teamSelectTitle.textContent = terms.teamSelectTitle;
+    
+    const teamSelectHint = document.querySelector('#team-select-area .section-header p');
+    if (teamSelectHint) teamSelectHint.textContent = terms.teamSelectHint;
+    
+    const randomBtn = document.querySelector('#team-select-area .random-btn');
+    if (randomBtn) randomBtn.textContent = terms.randomBtn;
+    
+    // 更新球员选择区域
+    const playerSelectHint = document.querySelector('#player-select-area .section-header p');
+    if (playerSelectHint) playerSelectHint.textContent = terms.playerSelectHint;
+    
+    const redrawBtn = document.querySelector('.redraw-btn');
+    if (redrawBtn) redrawBtn.textContent = terms.redrawBtn;
+    
+    const skipBtn = document.querySelector('.skip-btn');
+    if (skipBtn) skipBtn.textContent = terms.skipBtn;
+    
+    // 更新自定义输入区域
+    const customBadge = document.querySelector('.custom-badge');
+    if (customBadge) customBadge.textContent = terms.customBadge;
+    
+    const customHint = document.querySelector('.custom-hint');
+    if (customHint) customHint.textContent = terms.customHint;
+    
+    const customSeason = document.getElementById('custom-season');
+    if (customSeason) customSeason.placeholder = terms.customSeasonPlaceholder;
+    
+    const customName = document.getElementById('custom-name');
+    if (customName) customName.placeholder = terms.customNamePlaceholder;
+    
+    const customNameEn = document.getElementById('custom-name-en');
+    if (customNameEn) customNameEn.placeholder = terms.customNameEnPlaceholder;
+    
+    // 更新对战区域
+    const battleTitle = document.querySelector('.battle-header h2');
+    if (battleTitle) battleTitle.textContent = terms.battleTitle;
+    
+    const gameLogTitle = document.querySelector('#game-log h3');
+    if (gameLogTitle) gameLogTitle.textContent = terms.gameLog;
+    
+    const simulateBtn = document.getElementById('simulate-btn');
+    if (simulateBtn) simulateBtn.textContent = terms.simulateBtn;
+    
+    const restartBtn = document.getElementById('restart-btn');
+    if (restartBtn) restartBtn.textContent = terms.restartBtn;
+    
+    // 更新总评分标签
+    document.querySelectorAll('.stat-label').forEach(el => {
+        if (el.textContent.includes('总评分') || el.textContent.includes('总分')) {
+            el.textContent = terms.totalLabel;
+        }
+    });
+    
+    // 更新位置选择器标题
+    const positionSelectorTitle = document.querySelector('#position-selector h3');
+    if (positionSelectorTitle) positionSelectorTitle.textContent = terms.positionAssign;
+    
+    // 重新渲染队伍网格和球员列表（如果有的话）
+    renderTeamGrid();
+    if (gameState.drawnTeam) {
+        renderTeamPlayers(gameState.drawnTeam);
+    }
+}
+
+// 更新位置标签
+function updatePositionLabels() {
+    const terms = getTerms();
+    document.querySelectorAll('.position-label').forEach(el => {
+        const posText = el.textContent;
+        // 提取位置代码（如 "1项目" -> 找到对应的 PG）
+        if (posText.includes('1') || posText.includes('控球')) {
+            el.textContent = terms.position.PG;
+        } else if (posText.includes('2') || posText.includes('得分')) {
+            el.textContent = terms.position.SG;
+        } else if (posText.includes('3') || posText.includes('小前')) {
+            el.textContent = terms.position.SF;
+        } else if (posText.includes('4') || posText.includes('大前')) {
+            el.textContent = terms.position.PF;
+        } else if (posText.includes('5') || posText.includes('中锋')) {
+            el.textContent = terms.position.C;
+        }
+    });
+}
+
 // 游戏状态
 const gameState = {
     phase: 'selection', // 'selection' | 'battle'
@@ -69,14 +421,10 @@ const gameState = {
     }
 };
 
-// 位置名称（伪装为岗位名称，带编号）
-const positionNames = {
-    PG: '1项目',
-    SG: '2技术',
-    SF: '3运营',
-    PF: '4市场',
-    C: '5财务'
-};
+// 位置名称（动态获取）
+function getPositionNames() {
+    return getTerms().position;
+}
 
 // 获取玩家名称
 function getPlayerName(playerNum) {
@@ -98,6 +446,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function initializeGame() {
+    applyDisplayMode(); // 应用显示模式
     renderTeamGrid();
     updateUI();
 }
@@ -177,7 +526,7 @@ function renderTeamPlayers(teamId) {
                     </div>
                 </div>
                 <div class="player-positions">
-                    ${player.positions.map(pos => `<span class="position-tag">${positionNames[pos]}</span>`).join('')}
+                    ${player.positions.map(pos => `<span class="position-tag">${getPositionNames()[pos]}</span>`).join('')}
                 </div>
                 <div class="player-stats">
                     <span><span class="icon">🏆</span> ${player.championships}冠</span>
@@ -201,7 +550,8 @@ function updateUI() {
     document.getElementById('round-number').textContent = Math.floor(gameState.currentTurn / 2) + 1;
     
     // 更新阶段提示
-    const phaseText = gameState.selectionPhase === 'draw' ? '选择部门' : '分配人员';
+    const terms = getTerms();
+    const phaseText = gameState.selectionPhase === 'draw' ? terms.phaseDrawTeam : terms.phasePickPlayer;
     document.getElementById('phase-text').textContent = phaseText;
     
     // 更新预算显示
@@ -252,15 +602,15 @@ function updateRosterDisplay(playerNum) {
         if (player) {
             slot.classList.add('filled');
             slot.innerHTML = `
-                <span class="position-label">${positionNames[position]}</span>
+                <span class="position-label">${getPositionNames()[position]}</span>
                 <span class="player-name">${player.name}</span>
                 <span class="cost-badge cost-${player.cost}" style="width:30px;height:30px;font-size:0.9rem;">${player.cost}</span>
             `;
         } else {
             slot.classList.remove('filled');
             slot.innerHTML = `
-                <span class="position-label">${positionNames[position]}</span>
-                <span class="player-name empty">空缺</span>
+                <span class="position-label">${getPositionNames()[position]}</span>
+                <span class="player-name empty">${getTerms().emptySlot}</span>
             `;
         }
     });
@@ -294,7 +644,7 @@ function drawTeam(teamId) {
     ]);
     
     if (usedTeams.has(teamId)) {
-        showToast('该部门已被分配');
+        showToast(getTerms().teamUsed);
         return;
     }
     
@@ -309,7 +659,7 @@ function drawTeam(teamId) {
     renderTeamPlayers(teamId);
     
     updateUI();
-    showToast(`${getPlayerName(gameState.currentPlayer)} 选择了 ${team.name} 部门`);
+    showToast(`${getPlayerName(gameState.currentPlayer)} 选择了 ${team.name} ${getTerms().teamSelected}`);
 }
 
 // 随机抽取队伍
@@ -325,7 +675,7 @@ function randomDrawTeam() {
     const availableTeams = NBA_TEAMS.filter(t => !usedTeams.has(t.id));
     
     if (availableTeams.length === 0) {
-        showToast('没有可用的部门了');
+        showToast(getTerms().noTeamsAvailable);
         return;
     }
     
@@ -376,7 +726,7 @@ function selectPlayer(playerId) {
     
     // 检查是否已被选择
     if (gameState.selectedPlayerIds.has(playerId)) {
-        showToast('该员工已被分配');
+        showToast(getTerms().playerUsed);
         return;
     }
     
@@ -419,7 +769,7 @@ function addCustomPlayer() {
     }
     
     if (!name) {
-        showToast('请输入员工姓名');
+        showToast(getTerms().enterPlayerName);
         nameInput.focus();
         return;
     }
@@ -493,7 +843,7 @@ function showPositionSelector(player) {
     const playerNameEl = document.getElementById('selected-player-name');
     const buttonsContainer = document.getElementById('position-buttons');
     
-    playerNameEl.textContent = `为 ${player.name} 分配岗位`;
+    playerNameEl.textContent = getTerms().positionAssignHint.replace('{name}', player.name);
     
     const roster = gameState.players[gameState.currentPlayer].roster;
     
@@ -503,7 +853,7 @@ function showPositionSelector(player) {
             <button class="pos-btn" 
                     onclick="assignPosition('${pos}')" 
                     ${isOccupied ? 'disabled' : ''}>
-                ${positionNames[pos]}
+                ${getPositionNames()[pos]}
                 ${isOccupied ? '(已占用)' : ''}
             </button>
         `;
@@ -545,7 +895,9 @@ function assignPosition(position) {
     // 更新UI
     updateUI();
     
-    showToast(`${getPlayerName(currentPlayerNum)} 分配 ${player.name} 至${positionNames[position]}岗位`);
+    const terms = getTerms();
+    const posLabel = displayMode === 'office' ? '岗位' : '位置';
+    showToast(`${getPlayerName(currentPlayerNum)} 分配 ${player.name} 至${getPositionNames()[position]}${posLabel}`);
 }
 
 // 取消选择
@@ -573,7 +925,7 @@ function redrawTeam() {
     gameState.selectionPhase = 'draw';
     
     updateUI();
-    showToast(`${getPlayerName(gameState.currentPlayer)} 重新选择部门`);
+    showToast(`${getPlayerName(gameState.currentPlayer)} ${getTerms().redrawTeamToast}`);
 }
 
 // 跳过选人（如果队伍没有合适的球员）
@@ -649,7 +1001,7 @@ function renderBattleRosters() {
                 
                 return `
                     <div class="team-player">
-                        <span class="position">${positionNames[pos]}</span>
+                        <span class="position">${getPositionNames()[pos]}</span>
                         <span class="name">${player.name}</span>
                         <span class="season-team">${season} · ${teamName}</span>
                         <span class="cost">${player.cost}分</span>
@@ -839,7 +1191,7 @@ function displaySeriesResult(result, logContent) {
         const fmvpEntry = document.createElement('div');
         fmvpEntry.className = 'log-entry fmvp-award';
         fmvpEntry.innerHTML = `
-            <div class="log-game-num">★ 季度最佳员工</div>
+            <div class="log-game-num">★ ${getTerms().bestEmployee}</div>
             <div class="fmvp-content">
                 <div class="fmvp-name">${result.fmvp.name}</div>
                 ${result.fmvp.avgStats ? `
@@ -1360,7 +1712,7 @@ async function displayAIResult(result, logContent) {
         const fmvpEntry = document.createElement('div');
         fmvpEntry.className = 'log-entry fmvp-award';
         fmvpEntry.innerHTML = `
-            <div class="log-game-num">★ 季度最佳员工</div>
+            <div class="log-game-num">★ ${getTerms().bestEmployee}</div>
             <div class="fmvp-content">
                 <div class="fmvp-name">${result.fmvp.name}</div>
                 ${result.fmvp.avgStats ? `
@@ -1538,7 +1890,7 @@ function showChampion(winner, fmvp = null) {
     
     let championText = `${getPlayerName(winner)} 获得本季度优秀团队`;
     if (fmvp) {
-        championText += `<br><span class="fmvp-badge">最佳员工: ${fmvp.name}</span>`;
+        championText += `<br><span class="fmvp-badge">${getTerms().bestEmployeeBadge}: ${fmvp.name}</span>`;
     }
     championName.innerHTML = championText;
     championDisplay.classList.remove('hidden');
