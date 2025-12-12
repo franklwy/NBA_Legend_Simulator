@@ -4,7 +4,327 @@
 // ========================================
 
 // API配置
-const API_BASE_URL = 'http://localhost:5000';
+const API_BASE_URL = window.location.origin.includes('localhost') 
+    ? 'http://localhost:5000' 
+    : window.location.origin;
+
+// ========================================
+// 多人在线 - WebSocket 配置
+// ========================================
+let socket = null;
+let onlineMode = false;
+let roomId = null;
+let myPlayerNum = null;
+let isReady = false;
+
+// 初始化 Socket.IO 连接
+function initSocket() {
+    if (socket && socket.connected) return;
+    
+    socket = io(API_BASE_URL, {
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionAttempts: 5
+    });
+    
+    socket.on('connect', () => {
+        console.log('[WebSocket] 已连接到服务器');
+    });
+    
+    socket.on('disconnect', () => {
+        console.log('[WebSocket] 与服务器断开连接');
+        showToast('与服务器断开连接', 'error');
+    });
+    
+    socket.on('error', (data) => {
+        console.error('[WebSocket] 错误:', data.message);
+        showToast(data.message, 'error');
+    });
+    
+    // 房间事件
+    socket.on('room_created', handleRoomCreated);
+    socket.on('room_joined', handleRoomJoined);
+    socket.on('player_joined', handlePlayerJoined);
+    socket.on('player_left', handlePlayerLeft);
+    socket.on('player_ready', handlePlayerReady);
+    
+    // 游戏事件
+    socket.on('team_selected', handleTeamSelected);
+    socket.on('player_selected', handlePlayerSelected);
+    socket.on('turn_skipped', handleTurnSkipped);
+    socket.on('battle_ready', handleBattleReady);
+    
+    // 对战模拟事件
+    socket.on('battle_started', handleBattleStarted);
+    socket.on('battle_stream', handleBattleStream);
+}
+
+// 房间事件处理
+function handleRoomCreated(data) {
+    console.log('[房间] 房间已创建:', data);
+    roomId = data.room_id;
+    myPlayerNum = data.player_num;
+    updateWaitingRoom(data.room_state);
+    showWaitingRoom();
+}
+
+function handleRoomJoined(data) {
+    console.log('[房间] 已加入房间:', data);
+    roomId = data.room_id;
+    myPlayerNum = data.player_num;
+    updateWaitingRoom(data.room_state);
+    showWaitingRoom();
+}
+
+function handlePlayerJoined(data) {
+    console.log('[房间] 玩家加入:', data);
+    updateWaitingRoom(data.room_state);
+    showToast(`${data.player_name} 加入了房间`, 'success');
+}
+
+function handlePlayerLeft(data) {
+    console.log('[房间] 玩家离开:', data);
+    showToast(data.message, 'warning');
+    // 如果对方离开,回到房间大厅
+    if (data.player_num !== myPlayerNum) {
+        leaveRoom();
+    }
+}
+
+function handlePlayerReady(data) {
+    console.log('[房间] 玩家准备:', data);
+    updateWaitingRoom(data.room_state);
+    
+    // 如果双方都准备好了,开始游戏
+    if (data.room_state.game_state.phase === 'selection') {
+        startOnlineGame(data.room_state);
+    }
+}
+
+// 游戏事件处理
+function handleTeamSelected(data) {
+    console.log('[游戏] 队伍已选择:', data);
+    
+    // 先同步游戏状态
+    syncGameState(data.room_state);
+    
+    // 如果是当前玩家选择的队伍，显示球员列表
+    if (data.player_num == myPlayerNum) {
+        renderTeamPlayers(data.team_code);
+    }
+    
+    showToast(`${getPlayerName(data.player_num)} 选择了队伍`, 'info');
+}
+
+function handlePlayerSelected(data) {
+    console.log('[游戏] 球员已选择:', data);
+    console.log('[游戏] 服务器返回的 current_player:', data.room_state.game_state.current_player);
+    
+    // 隐藏位置选择器
+    const selector = document.getElementById('position-selector');
+    if (selector) {
+        selector.classList.add('hidden');
+    }
+    gameState.pendingPlayer = null;
+    
+    // 同步游戏状态
+    syncGameState(data.room_state);
+    
+    console.log('[游戏] 同步后 gameState.currentPlayer:', gameState.currentPlayer);
+    
+    showToast(`${getPlayerName(data.player_num)} 选择了 ${data.player_data.name}`, 'success');
+}
+
+function handleTurnSkipped(data) {
+    console.log('[游戏] 回合跳过:', data);
+    
+    // 同步游戏状态
+    syncGameState(data.room_state);
+    
+    showToast(`${getPlayerName(data.player_num)} 跳过了回合`, 'info');
+}
+
+function handleBattleReady(data) {
+    console.log('[游戏] 准备对战:', data);
+    // 这里可以触发对战模拟
+    showToast('双方阵容已满,准备开始对战!', 'success');
+}
+
+// 对战开始事件
+function handleBattleStarted(data) {
+    console.log('[对战] 对战开始:', data);
+    
+    // 禁用按钮，显示状态
+    const simulateBtn = document.getElementById('simulate-btn');
+    if (simulateBtn) {
+        simulateBtn.disabled = true;
+        simulateBtn.textContent = '数据分析中...';
+    }
+    
+    // 清空日志
+    const logContent = document.getElementById('log-content');
+    if (logContent) {
+        logContent.innerHTML = '';
+    }
+    
+    // 重置比分
+    gameState.battle = {
+        team1Wins: 0,
+        team2Wins: 0,
+        gamesPlayed: 0
+    };
+    updateBattleScore();
+    
+    // 创建思考框
+    createThinkingBox();
+    
+    showToast('对战模拟开始，双方都可以看到结果', 'info');
+}
+
+// 对战流式数据
+function handleBattleStream(data) {
+    console.log('[对战] 收到流式数据:', data.type);
+    
+    if (data.type === 'reasoning') {
+        // 更新思考内容
+        const thinkingContentEl = document.getElementById('thinking-content');
+        if (thinkingContentEl) {
+            const spinner = thinkingContentEl.querySelector('.thinking-spinner');
+            if (spinner) spinner.remove();
+            
+            if (!thinkingContentEl.dataset.content) {
+                thinkingContentEl.dataset.content = '';
+            }
+            thinkingContentEl.dataset.content += data.content;
+            thinkingContentEl.textContent = thinkingContentEl.dataset.content;
+            thinkingContentEl.scrollTop = thinkingContentEl.scrollHeight;
+        }
+    } else if (data.type === 'content') {
+        // 收集生成的内容
+        if (!window.battleContentBuffer) {
+            window.battleContentBuffer = '';
+            
+            // 第一次收到 content 时，更新思考状态并创建实时输出区域
+            const statusEl = document.getElementById('thinking-status');
+            if (statusEl) {
+                statusEl.textContent = '✓ 思考完成';
+                statusEl.classList.add('completed');
+            }
+            
+            // 默认折叠思考框
+            const thinkingBody = document.getElementById('thinking-body');
+            const toggleIcon = document.getElementById('thinking-toggle-icon');
+            if (thinkingBody && toggleIcon) {
+                thinkingBody.classList.add('collapsed');
+                toggleIcon.textContent = '▶';
+            }
+            
+            // 创建实时输出区域
+            createLiveOutputBox();
+        }
+        
+        window.battleContentBuffer += data.content;
+        
+        // 实时显示输出内容
+        const liveOutputEl = document.getElementById('live-output-content');
+        if (liveOutputEl) {
+            liveOutputEl.textContent = window.battleContentBuffer;
+            liveOutputEl.scrollTop = liveOutputEl.scrollHeight;
+        }
+    } else if (data.type === 'result') {
+        // 显示最终结果
+        const logContent = document.getElementById('log-content');
+        if (logContent && data.data) {
+            // 移除实时输出区域
+            const liveOutputBox = document.getElementById('live-output-box');
+            if (liveOutputBox) {
+                liveOutputBox.remove();
+            }
+            
+            // 显示对战结果
+            displaySeriesResult(data.data, logContent);
+            
+            // 显示冠军
+            const champion = data.data.champion;
+            const fmvp = data.data.fmvp;
+            showChampion(champion, fmvp);
+        }
+        
+        // 恢复按钮
+        const simulateBtn = document.getElementById('simulate-btn');
+        if (simulateBtn) {
+            simulateBtn.disabled = false;
+            simulateBtn.textContent = '开始绩效评估';
+        }
+        
+        // 清理缓冲
+        window.battleContentBuffer = '';
+    } else if (data.type === 'error') {
+        console.error('[对战] 错误:', data.error);
+        showToast('对战模拟失败: ' + data.error, 'error');
+        
+        // 恢复按钮
+        const simulateBtn = document.getElementById('simulate-btn');
+        if (simulateBtn) {
+            simulateBtn.disabled = false;
+            simulateBtn.textContent = '开始绩效评估';
+        }
+    }
+}
+
+// 创建思考框
+function createThinkingBox() {
+    const logContent = document.getElementById('log-content');
+    if (!logContent) return;
+    
+    const thinkingEntry = document.createElement('div');
+    thinkingEntry.className = 'thinking-box';
+    thinkingEntry.innerHTML = `
+        <div class="thinking-header" onclick="toggleThinkingBox()" title="点击展开/折叠思考过程">
+            <div class="thinking-title">
+                <span class="thinking-icon">💭</span>
+                <span class="thinking-label">AI思考过程</span>
+                <span class="thinking-status" id="thinking-status">思考中...</span>
+                <span class="thinking-hint">(点击展开/折叠)</span>
+            </div>
+            <span class="thinking-toggle" id="thinking-toggle-icon">▼</span>
+        </div>
+        <div class="thinking-body" id="thinking-body">
+            <div class="thinking-content" id="thinking-content">
+                <div class="thinking-spinner"></div>
+            </div>
+        </div>
+    `;
+    logContent.appendChild(thinkingEntry);
+}
+
+// 创建实时输出框
+function createLiveOutputBox() {
+    const logContent = document.getElementById('log-content');
+    if (!logContent) return;
+    
+    // 检查是否已存在
+    if (document.getElementById('live-output-box')) return;
+    
+    const liveOutputBox = document.createElement('div');
+    liveOutputBox.id = 'live-output-box';
+    liveOutputBox.className = 'live-output-box';
+    liveOutputBox.innerHTML = `
+        <div class="live-output-header">
+            <div class="live-output-title">
+                <span class="live-output-icon">📝</span>
+                <span class="live-output-label">正在生成结果...</span>
+                <span class="live-output-hint">实时输出</span>
+            </div>
+        </div>
+        <div class="live-output-content" id="live-output-content"></div>
+    `;
+    logContent.appendChild(liveOutputBox);
+    
+    // 滚动到底部
+    logContent.scrollTop = logContent.scrollHeight;
+}
 
 // ========================================
 // 显示模式配置
@@ -439,10 +759,280 @@ function updatePlayerName(playerNum, name) {
 }
 
 // ========================================
+// 房间管理函数
+// ========================================
+
+// 显示房间模式选择界面
+function showRoomLobby() {
+    document.getElementById('room-lobby').style.display = 'flex';
+    document.querySelector('.container').style.display = 'none';
+}
+
+// 隐藏房间界面,显示游戏界面
+function hideRoomLobby() {
+    document.getElementById('room-lobby').style.display = 'none';
+    document.querySelector('.container').style.display = 'block';
+}
+
+// 切换房间模式
+function showRoomMode(mode) {
+    const buttons = document.querySelectorAll('.mode-btn');
+    buttons.forEach(btn => btn.classList.remove('active'));
+    event.target.classList.add('active');
+    
+    if (mode === 'single') {
+        document.getElementById('single-mode-panel').style.display = 'block';
+        document.getElementById('online-mode-panel').style.display = 'none';
+    } else {
+        document.getElementById('single-mode-panel').style.display = 'none';
+        document.getElementById('online-mode-panel').style.display = 'block';
+        // 初始化 Socket 连接
+        initSocket();
+    }
+}
+
+// 开始单机模式
+function startSingleMode() {
+    onlineMode = false;
+    hideRoomLobby();
+    resetGame();
+}
+
+// 创建在线房间
+function createOnlineRoom() {
+    const playerName = document.getElementById('lobby-player-name').value.trim() || '玩家1';
+    
+    if (!socket || !socket.connected) {
+        showToast('正在连接服务器,请稍候...', 'info');
+        initSocket();
+        setTimeout(() => createOnlineRoom(), 1000);
+        return;
+    }
+    
+    socket.emit('create_room', { player_name: playerName });
+}
+
+// 加入在线房间
+function joinOnlineRoom() {
+    const roomIdInput = document.getElementById('room-id-input').value.trim();
+    const playerName = document.getElementById('lobby-player-name').value.trim() || '玩家2';
+    
+    if (!roomIdInput) {
+        showToast('请输入房间号', 'error');
+        return;
+    }
+    
+    if (!socket || !socket.connected) {
+        showToast('正在连接服务器,请稍候...', 'info');
+        initSocket();
+        setTimeout(() => joinOnlineRoom(), 1000);
+        return;
+    }
+    
+    socket.emit('join_room', { room_id: roomIdInput, player_name: playerName });
+}
+
+// 显示等待房间
+function showWaitingRoom() {
+    document.getElementById('online-mode-panel').style.display = 'none';
+    document.getElementById('single-mode-panel').style.display = 'none';
+    document.getElementById('waiting-room').style.display = 'block';
+    document.getElementById('current-room-id').textContent = roomId;
+}
+
+// 更新等待房间状态
+function updateWaitingRoom(roomState) {
+    const player1 = roomState.players['1'];
+    const player2 = roomState.players['2'];
+    
+    // 更新玩家1信息
+    document.getElementById('waiting-player1-name').textContent = player1 ? player1.name : '等待中...';
+    document.getElementById('waiting-player1-status').textContent = player1?.ready ? '✅ 已准备' : '⏳ 未准备';
+    
+    // 更新玩家2信息
+    document.getElementById('waiting-player2-name').textContent = player2 ? player2.name : '等待加入...';
+    document.getElementById('waiting-player2-status').textContent = player2?.ready ? '✅ 已准备' : '⏳ 未准备';
+    
+    // 更新提示信息
+    const hintEl = document.getElementById('waiting-hint');
+    const readyBtn = document.getElementById('ready-btn');
+    
+    if (!player2) {
+        hintEl.textContent = `分享房间号 ${roomId} 给好友,等待对方加入...`;
+        readyBtn.disabled = true;
+    } else if (player1.ready && player2.ready) {
+        hintEl.textContent = '游戏即将开始...';
+        readyBtn.disabled = true;
+    } else {
+        hintEl.textContent = '双方准备后开始游戏';
+        readyBtn.disabled = false;
+    }
+    
+    // 更新准备按钮状态
+    const myReady = roomState.players[myPlayerNum]?.ready;
+    if (myReady) {
+        readyBtn.textContent = '✅ 已准备';
+        readyBtn.classList.add('ready');
+    } else {
+        readyBtn.textContent = '准备';
+        readyBtn.classList.remove('ready');
+    }
+}
+
+// 切换准备状态
+function toggleReady() {
+    if (!socket || !roomId) return;
+    
+    socket.emit('ready', {
+        room_id: roomId,
+        player_num: myPlayerNum
+    });
+}
+
+// 离开房间
+function leaveRoom() {
+    if (socket) {
+        socket.disconnect();
+        socket = null;
+    }
+    
+    roomId = null;
+    myPlayerNum = null;
+    isReady = false;
+    onlineMode = false;
+    
+    // 重置界面
+    document.getElementById('waiting-room').style.display = 'none';
+    document.getElementById('online-mode-panel').style.display = 'block';
+    document.getElementById('room-id-input').value = '';
+    
+    showToast('已离开房间', 'info');
+}
+
+// 开始在线游戏
+function startOnlineGame(roomState) {
+    onlineMode = true;
+    
+    // 更新玩家名称
+    gameState.playerNames['1'] = roomState.players['1'].name;
+    gameState.playerNames['2'] = roomState.players['2'].name;
+    
+    // 同步游戏状态
+    syncGameState(roomState);
+    
+    // 显示游戏界面
+    hideRoomLobby();
+    
+    // 确保显示选择区域
+    const selectionArea = document.getElementById('selection-area');
+    if (selectionArea) {
+        selectionArea.style.display = 'block';
+        selectionArea.classList.remove('hidden');
+    }
+    
+    // 确保显示回合指示器
+    const turnIndicator = document.getElementById('turn-indicator');
+    if (turnIndicator) {
+        turnIndicator.style.display = 'flex';
+        turnIndicator.classList.remove('hidden');
+    }
+    
+    // 隐藏对战区域
+    const battleArea = document.getElementById('battle-area');
+    if (battleArea) {
+        battleArea.style.display = 'none';
+    }
+    
+    // 初始化游戏界面
+    initializeGame();
+    
+    showToast('游戏开始!', 'success');
+}
+
+// 同步游戏状态
+function syncGameState(roomState) {
+    const gs = roomState.game_state;
+    
+    // 同步游戏阶段
+    if (gs.phase) {
+        gameState.phase = gs.phase;
+    }
+    
+    // 更新当前玩家和回合（保持字符串类型以便与 myPlayerNum 比较）
+    gameState.currentPlayer = gs.current_player ? parseInt(gs.current_player) : 1;
+    gameState.round = gs.round;
+    
+    // 更新预算
+    gameState.players[1].budget = gs.budgets['1'];
+    gameState.players[2].budget = gs.budgets['2'];
+    
+    // 更新已选队伍
+    gameState.players[1].usedTeams = gs.used_teams['1'];
+    gameState.players[2].usedTeams = gs.used_teams['2'];
+    
+    // 更新阵容
+    gameState.players[1].roster = gs.teams['1'];
+    gameState.players[2].roster = gs.teams['2'];
+    
+    // 更新抽取的队伍
+    gameState.drawnTeam = gs.drawn_team;
+    
+    // 同步选择阶段 (服务器用 selection_phase，客户端用 selectionPhase)
+    if (gs.selection_phase) {
+        gameState.selectionPhase = gs.selection_phase;
+    }
+    
+    // 更新 UI
+    updateUI();
+    renderTeamGrid();
+    
+    // 检查是否可以开始对战
+    if (gs.phase === 'battle') {
+        console.log('[同步] 切换到对战阶段');
+        gameState.phase = 'battle';
+        
+        // 更新阶段指示器
+        document.getElementById('phase-select').classList.remove('active');
+        document.getElementById('phase-battle').classList.add('active');
+        
+        // 隐藏选人区域
+        const selectionArea = document.getElementById('selection-area');
+        if (selectionArea) {
+            selectionArea.style.display = 'none';
+            selectionArea.classList.add('hidden');
+        }
+        
+        const turnIndicator = document.getElementById('turn-indicator');
+        if (turnIndicator) {
+            turnIndicator.style.display = 'none';
+            turnIndicator.classList.add('hidden');
+        }
+        
+        // 显示对战区域
+        const battleArea = document.getElementById('battle-area');
+        if (battleArea) {
+            battleArea.style.display = 'block';
+            battleArea.classList.remove('hidden');
+        }
+        
+        // 更新对战界面的玩家名称
+        document.getElementById('battle-player1-name').textContent = getPlayerName(1);
+        document.getElementById('battle-player2-name').textContent = getPlayerName(2);
+        document.getElementById('battle-roster1-title').textContent = `${getPlayerName(1)}阵容`;
+        document.getElementById('battle-roster2-title').textContent = `${getPlayerName(2)}阵容`;
+        
+        // 渲染对战阵容
+        renderBattleRosters();
+    }
+}
+
+// ========================================
 // 初始化
 // ========================================
 document.addEventListener('DOMContentLoaded', () => {
-    initializeGame();
+    // 先显示房间选择界面
+    showRoomLobby();
+    applyDisplayMode(); // 应用显示模式
 });
 
 function initializeGame() {
@@ -540,14 +1130,24 @@ function renderTeamPlayers(teamId) {
 
 // 更新UI
 function updateUI() {
-    // 更新当前玩家
-    const currentPlayer = gameState.turnOrder[gameState.currentTurn];
-    gameState.currentPlayer = currentPlayer;
+    // 更新当前玩家（在线模式下使用服务器同步的值，单机模式下根据turnOrder计算）
+    let currentPlayer;
+    if (onlineMode) {
+        // 在线模式：使用已同步的 currentPlayer
+        currentPlayer = gameState.currentPlayer;
+    } else {
+        // 单机模式：根据 turnOrder 计算
+        currentPlayer = gameState.turnOrder[gameState.currentTurn];
+        gameState.currentPlayer = currentPlayer;
+    }
     
     // 更新回合显示
     document.getElementById('current-player').textContent = getPlayerName(currentPlayer);
     document.getElementById('current-player').className = `turn-player player${currentPlayer}`;
-    document.getElementById('round-number').textContent = Math.floor(gameState.currentTurn / 2) + 1;
+    
+    // 在线模式使用 round，单机模式计算回合数
+    const roundNum = onlineMode ? gameState.round : (Math.floor(gameState.currentTurn / 2) + 1);
+    document.getElementById('round-number').textContent = roundNum;
     
     // 更新阶段提示
     const terms = getTerms();
@@ -637,6 +1237,12 @@ function drawTeam(teamId) {
     const team = getTeamById(teamId);
     if (!team) return;
     
+    // 在线模式下检查是否轮到自己（统一转换为数字比较）
+    if (onlineMode && myPlayerNum && gameState.currentPlayer != parseInt(myPlayerNum)) {
+        showToast('还没轮到你操作', 'warning');
+        return;
+    }
+    
     // 检查队伍是否已被使用
     const usedTeams = new Set([
         ...gameState.players[1].usedTeams,
@@ -648,7 +1254,17 @@ function drawTeam(teamId) {
         return;
     }
     
-    // 记录抽中的队伍
+    // 在线模式：通过 WebSocket 发送
+    if (onlineMode && socket) {
+        socket.emit('select_team', {
+            room_id: roomId,
+            player_num: myPlayerNum,
+            team_code: teamId
+        });
+        return;
+    }
+    
+    // 单机模式：本地处理
     gameState.drawnTeam = teamId;
     gameState.players[gameState.currentPlayer].usedTeams.push(teamId);
     
@@ -782,7 +1398,7 @@ function addCustomPlayer() {
     
     // 检查位置是否已占用
     const roster = gameState.players[gameState.currentPlayer].roster;
-    if (roster[position] !== null) {
+    if (roster[position] !== undefined && roster[position] !== null) {
         showToast('该岗位已有人员');
         return;
     }
@@ -848,7 +1464,8 @@ function showPositionSelector(player) {
     const roster = gameState.players[gameState.currentPlayer].roster;
     
     buttonsContainer.innerHTML = player.positions.map(pos => {
-        const isOccupied = roster[pos] !== null;
+        // 检查位置是否被占用（考虑 undefined 和 null 都是未占用）
+        const isOccupied = roster[pos] !== undefined && roster[pos] !== null;
         return `
             <button class="pos-btn" 
                     onclick="assignPosition('${pos}')" 
@@ -871,12 +1488,27 @@ function assignPosition(position) {
     const roster = gameState.players[currentPlayerNum].roster;
     
     // 检查位置是否已占用
-    if (roster[position] !== null) {
+    if (roster[position] !== undefined && roster[position] !== null) {
         showToast('该岗位已有人员');
         return;
     }
     
-    // 分配球员
+    // 在线模式：通过 WebSocket 发送
+    if (onlineMode && socket) {
+        socket.emit('select_player', {
+            room_id: roomId,
+            player_num: myPlayerNum,
+            player_data: player,
+            position: position
+        });
+        
+        // 隐藏位置选择器
+        document.getElementById('position-selector').classList.add('hidden');
+        gameState.pendingPlayer = null;
+        return;
+    }
+    
+    // 单机模式：本地处理
     roster[position] = player;
     gameState.players[currentPlayerNum].budget -= player.cost;
     gameState.selectedPlayerIds.add(player.id);
@@ -932,6 +1564,16 @@ function redrawTeam() {
 function skipPick() {
     if (gameState.phase !== 'selection' || gameState.selectionPhase !== 'pick') return;
     
+    // 在线模式：通过 WebSocket 发送
+    if (onlineMode && socket) {
+        socket.emit('skip_turn', {
+            room_id: roomId,
+            player_num: myPlayerNum
+        });
+        return;
+    }
+    
+    // 单机模式：本地处理
     showToast(`${getPlayerName(gameState.currentPlayer)} 跳过本轮分配`);
     
     gameState.drawnTeam = null;
@@ -1042,14 +1684,35 @@ async function simulateSeries() {
     const team1Data = gameState.players[1].roster;
     const team2Data = gameState.players[2].roster;
     
-    // 显示分析中提示
+    // 在线模式：通过 WebSocket 请求，结果会广播给双方
+    if (onlineMode && socket && roomId) {
+        console.log('[对战] 在线模式：通过 WebSocket 请求对战模拟');
+        socket.emit('start_battle', {
+            room_id: roomId,
+            team1: team1Data,
+            team2: team2Data,
+            playerNames: gameState.playerNames
+        });
+        return; // 等待服务器广播结果
+    }
+    
+    // 创建DeepSeek风格的思考过程显示框
     const thinkingEntry = document.createElement('div');
-    thinkingEntry.className = 'log-entry ai-thinking';
+    thinkingEntry.className = 'thinking-box';
     thinkingEntry.innerHTML = `
-        <div class="log-game-num">正在进行绩效评估分析...</div>
-        <div class="thinking-content" id="thinking-content">
-            <div class="thinking-spinner"></div>
-            <div class="thinking-text" id="thinking-text">AI正在分析双方团队配置...</div>
+        <div class="thinking-header" onclick="toggleThinkingBox()" title="点击展开/折叠思考过程">
+            <div class="thinking-title">
+                <span class="thinking-icon">💭</span>
+                <span class="thinking-label">AI思考过程</span>
+                <span class="thinking-status" id="thinking-status">思考中...</span>
+                <span class="thinking-hint">(点击展开/折叠)</span>
+            </div>
+            <span class="thinking-toggle" id="thinking-toggle-icon">▼</span>
+        </div>
+        <div class="thinking-body" id="thinking-body">
+            <div class="thinking-content" id="thinking-content">
+                <div class="thinking-spinner"></div>
+            </div>
         </div>
     `;
     logContent.appendChild(thinkingEntry);
@@ -1076,7 +1739,9 @@ async function simulateSeries() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let reasoningText = '';
+        let contentText = '';
         let resultData = null;
+        let contentStarted = false;
         
         while (true) {
             const { done, value } = await reader.read();
@@ -1095,9 +1760,48 @@ async function simulateSeries() {
                         
                         if (parsed.type === 'reasoning') {
                             reasoningText += parsed.content;
-                            const thinkingTextEl = document.getElementById('thinking-text');
-                            if (thinkingTextEl) {
-                                thinkingTextEl.innerHTML = formatThinking(reasoningText);
+                            const thinkingContentEl = document.getElementById('thinking-content');
+                            if (thinkingContentEl) {
+                                // 移除spinner
+                                const spinner = thinkingContentEl.querySelector('.thinking-spinner');
+                                if (spinner) spinner.remove();
+                                
+                                // 更新思考内容
+                                thinkingContentEl.textContent = reasoningText;
+                                
+                                // 自动滚动到底部
+                                thinkingContentEl.scrollTop = thinkingContentEl.scrollHeight;
+                            }
+                        } else if (parsed.type === 'content') {
+                            // 第一次收到 content 时，创建实时输出框
+                            if (!contentStarted) {
+                                contentStarted = true;
+                                
+                                // 更新思考状态为完成
+                                const statusEl = document.getElementById('thinking-status');
+                                if (statusEl) {
+                                    statusEl.textContent = '✓ 思考完成';
+                                    statusEl.classList.add('completed');
+                                }
+                                
+                                // 默认折叠思考框
+                                const thinkingBody = document.getElementById('thinking-body');
+                                const toggleIcon = document.getElementById('thinking-toggle-icon');
+                                if (thinkingBody && toggleIcon) {
+                                    thinkingBody.classList.add('collapsed');
+                                    toggleIcon.textContent = '▶';
+                                }
+                                
+                                // 创建实时输出区域
+                                createLiveOutputBox();
+                            }
+                            
+                            // 累积内容并实时显示
+                            contentText += parsed.content;
+                            const liveOutputEl = document.getElementById('live-output-content');
+                            if (liveOutputEl) {
+                                liveOutputEl.textContent = contentText;
+                                liveOutputEl.scrollTop = liveOutputEl.scrollHeight;
                             }
                         } else if (parsed.type === 'result') {
                             resultData = parsed.data;
@@ -1111,12 +1815,19 @@ async function simulateSeries() {
             }
         }
         
-        // 移除思考区域
-        thinkingEntry.remove();
+        // 移除实时输出区域
+        const liveOutputBox = document.getElementById('live-output-box');
+        if (liveOutputBox) {
+            liveOutputBox.remove();
+        }
         
         // 显示结果
         if (resultData) {
             displaySeriesResult(resultData, logContent);
+            
+            const champion = resultData.champion;
+            const fmvp = resultData.fmvp;
+            showChampion(champion, fmvp);
         } else {
             throw new Error('未收到有效结果');
         }
@@ -1135,11 +1846,63 @@ async function simulateSeries() {
 
 // 显示系列赛结果
 function displaySeriesResult(result, logContent) {
+    // 显示球队分析
+    if (result.teamAnalysis) {
+        const analysisEntry = document.createElement('div');
+        analysisEntry.className = 'log-entry team-analysis';
+        analysisEntry.innerHTML = `
+            <div class="log-game-num">📊 赛前战术分析</div>
+            <div class="analysis-content">
+                <div class="team-analysis-section">
+                    <h4>${getPlayerName(1)} 分析</h4>
+                    <div class="analysis-grid">
+                        ${result.teamAnalysis.team1 ? `
+                            <div class="analysis-item"><span class="label">空间:</span> ${result.teamAnalysis.team1.spacing || '-'}</div>
+                            <div class="analysis-item"><span class="label">组织:</span> ${result.teamAnalysis.team1.playmaking || '-'}</div>
+                            <div class="analysis-item"><span class="label">进攻:</span> ${result.teamAnalysis.team1.offense || '-'}</div>
+                            <div class="analysis-item"><span class="label">防守:</span> ${result.teamAnalysis.team1.defense || '-'}</div>
+                            <div class="analysis-item"><span class="label">化学反应:</span> ${result.teamAnalysis.team1.chemistry || '-'}</div>
+                            <div class="analysis-item"><span class="label">球星成色:</span> ${result.teamAnalysis.team1.starPower || '-'}</div>
+                            <div class="analysis-full"><span class="label">优势:</span> ${result.teamAnalysis.team1.strengths || '-'}</div>
+                            <div class="analysis-full"><span class="label">弱点:</span> ${result.teamAnalysis.team1.weaknesses || '-'}</div>
+                        ` : ''}
+                    </div>
+                </div>
+                <div class="team-analysis-section">
+                    <h4>${getPlayerName(2)} 分析</h4>
+                    <div class="analysis-grid">
+                        ${result.teamAnalysis.team2 ? `
+                            <div class="analysis-item"><span class="label">空间:</span> ${result.teamAnalysis.team2.spacing || '-'}</div>
+                            <div class="analysis-item"><span class="label">组织:</span> ${result.teamAnalysis.team2.playmaking || '-'}</div>
+                            <div class="analysis-item"><span class="label">进攻:</span> ${result.teamAnalysis.team2.offense || '-'}</div>
+                            <div class="analysis-item"><span class="label">防守:</span> ${result.teamAnalysis.team2.defense || '-'}</div>
+                            <div class="analysis-item"><span class="label">化学反应:</span> ${result.teamAnalysis.team2.chemistry || '-'}</div>
+                            <div class="analysis-item"><span class="label">球星成色:</span> ${result.teamAnalysis.team2.starPower || '-'}</div>
+                            <div class="analysis-full"><span class="label">优势:</span> ${result.teamAnalysis.team2.strengths || '-'}</div>
+                            <div class="analysis-full"><span class="label">弱点:</span> ${result.teamAnalysis.team2.weaknesses || '-'}</div>
+                        ` : ''}
+                    </div>
+                </div>
+                ${result.teamAnalysis.keyMatchups ? `
+                <div class="key-matchups">
+                    <h4>🔥 关键对位</h4>
+                    <p>${result.teamAnalysis.keyMatchups}</p>
+                </div>` : ''}
+                ${result.teamAnalysis.prediction ? `
+                <div class="prediction">
+                    <h4>🎯 赛前预测</h4>
+                    <p>${result.teamAnalysis.prediction}</p>
+                </div>` : ''}
+            </div>
+        `;
+        logContent.appendChild(analysisEntry);
+    }
+    
     // 显示系列赛开始
     const startEntry = document.createElement('div');
     startEntry.className = 'log-entry series-start';
     startEntry.innerHTML = `
-        <div class="log-game-num">季度绩效对比评估结果</div>
+        <div class="log-game-num">📋 系列赛结果</div>
         <div class="series-intro">BO7评估完成，最终比分 ${result.finalScore?.team1Wins || 0} - ${result.finalScore?.team2Wins || 0}</div>
     `;
     logContent.appendChild(startEntry);
@@ -1155,30 +1918,19 @@ function displaySeriesResult(result, logContent) {
             }
             
             const gameEntry = document.createElement('div');
-            gameEntry.className = `log-entry game-entry player${winner}-win`;
+            gameEntry.className = `log-entry game-entry-compact player${winner}-win`;
             gameEntry.innerHTML = `
-                <div class="game-header">
-                    <div class="log-game-num">第${game.gameNumber}轮评估</div>
-                    <div class="game-final-score">
-                        <span class="team-label">${getPlayerName(1)}</span>
+                <div class="game-compact-header">
+                    <span class="game-number">G${game.gameNumber}</span>
+                    <div class="game-score-line">
+                        <span class="team-name">${getPlayerName(1)}</span>
                         <span class="score ${winner === 1 ? 'winner' : ''}">${game.score?.team1 || 0}</span>
-                        <span class="vs">-</span>
+                        <span class="vs">:</span>
                         <span class="score ${winner === 2 ? 'winner' : ''}">${game.score?.team2 || 0}</span>
-                        <span class="team-label">${getPlayerName(2)}</span>
+                        <span class="team-name">${getPlayerName(2)}</span>
                     </div>
+                    ${game.keyFactor ? `<span class="key-factor-inline">🔑 ${game.keyFactor}</span>` : ''}
                 </div>
-                
-                ${game.team1Stats && game.team1Stats.length > 0 ? `
-                <div class="team-stats-section">
-                    <div class="stats-title">${getPlayerName(1)} 数据统计</div>
-                    ${renderSimplePlayerStats(game.team1Stats)}
-                </div>` : ''}
-                
-                ${game.team2Stats && game.team2Stats.length > 0 ? `
-                <div class="team-stats-section">
-                    <div class="stats-title">${getPlayerName(2)} 数据统计</div>
-                    ${renderSimplePlayerStats(game.team2Stats)}
-                </div>` : ''}
             `;
             logContent.appendChild(gameEntry);
         });
@@ -1198,6 +1950,8 @@ function displaySeriesResult(result, logContent) {
                 <div class="fmvp-stats">
                     场均 ${result.fmvp.avgStats.points || 0}分 ${result.fmvp.avgStats.rebounds || 0}篮板 ${result.fmvp.avgStats.assists || 0}助攻
                 </div>` : ''}
+                ${result.fmvp.reason ? `
+                <div class="fmvp-reason">${result.fmvp.reason}</div>` : ''}
             </div>
         `;
         logContent.appendChild(fmvpEntry);
@@ -1208,15 +1962,13 @@ function displaySeriesResult(result, logContent) {
         const summaryEntry = document.createElement('div');
         summaryEntry.className = 'log-entry series-summary';
         summaryEntry.innerHTML = `
-            <div class="log-game-num">评估总结</div>
+            <div class="log-game-num">📝 评估总结</div>
             <div class="summary-text">${result.summary}</div>
         `;
         logContent.appendChild(summaryEntry);
     }
     
-    // 显示冠军
-    const champion = result.champion || (gameState.battle.team1Wins >= 4 ? 1 : 2);
-    showChampion(champion, result.fmvp);
+    // 不在这里显示冠军，由调用方决定
 }
 
 // 渲染简化版球员数据统计表格
@@ -1255,342 +2007,6 @@ function renderSimplePlayerStats(stats) {
     `;
 }
 
-// 模拟单场比赛 (带重试)
-async function simulateSingleGame(team1Data, team2Data, gameNumber, logContent, retryCount = 0) {
-    const maxRetries = 2;
-    const seriesScore = {
-        team1: gameState.battle.team1Wins,
-        team2: gameState.battle.team2Wins
-    };
-    
-    // 添加AI思考区域
-    let thinkingEntry = document.getElementById(`thinking-game-${gameNumber}`);
-    if (!thinkingEntry) {
-        thinkingEntry = document.createElement('div');
-        thinkingEntry.className = 'log-entry ai-thinking';
-        thinkingEntry.id = `thinking-game-${gameNumber}`;
-        logContent.appendChild(thinkingEntry);
-    }
-    
-    thinkingEntry.innerHTML = `
-        <div class="log-game-num">第${gameNumber}轮评估 - 数据分析中...${retryCount > 0 ? ` (重试 ${retryCount}/${maxRetries})` : ''}</div>
-        <div class="thinking-content" id="thinking-content-${gameNumber}">
-            <div class="thinking-spinner"></div>
-            <div class="thinking-text">正在进行第${gameNumber}轮绩效评估...</div>
-        </div>
-    `;
-    logContent.scrollTop = logContent.scrollHeight;
-    
-    try {
-        // 调用单场比赛API
-        const response = await fetch(`${API_BASE_URL}/api/simulate-game-stream`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                team1: team1Data,
-                team2: team2Data,
-                gameNumber: gameNumber,
-                seriesScore: seriesScore,
-                playerNames: gameState.playerNames
-            })
-        });
-        
-        if (!response.ok) {
-            throw new Error(`第${gameNumber}场API请求失败 (${response.status})`);
-        }
-        
-        // 处理流式响应
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let reasoningText = '';
-        let contentText = ''; // 存储生成的JSON文本
-        let resultData = null;
-        let hasError = false;
-        let errorMessage = '';
-        let isGeneratingContent = false;
-        
-        const thinkingTextEl = document.getElementById(`thinking-content-${gameNumber}`);
-        let contentTextEl = null; // 用于显示生成中的内容
-        
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n');
-            
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6);
-                    if (data === '[DONE]') {
-                        console.log(`[Game ${gameNumber}] Stream ended`);
-                        continue;
-                    }
-                    
-                    try {
-                        const parsed = JSON.parse(data);
-                        console.log(`[Game ${gameNumber}] 收到类型:`, parsed.type);
-                        
-                        if (parsed.type === 'prompt') {
-                            // 显示本场比赛的提示词
-                            displayPrompts(parsed.systemPrompt, parsed.userPrompt, gameNumber);
-                        } else                         if (parsed.type === 'reasoning') {
-                            reasoningText += parsed.content;
-                            if (thinkingTextEl) {
-                                thinkingTextEl.innerHTML = `
-                                    <div class="thinking-label">第${gameNumber}轮 数据分析过程</div>
-                                    <div class="thinking-text">${formatThinking(reasoningText)}</div>
-                                `;
-                            }
-                            logContent.scrollTop = logContent.scrollHeight;
-                        } else if (parsed.type === 'content') {
-                            // 收集AI生成的内容
-                            contentText += parsed.content;
-                            console.log(`[Game ${gameNumber}] Content累计长度:`, contentText.length);
-                        } else if (parsed.type === 'result') {
-                            console.log(`[Game ${gameNumber}] Result received:`, parsed.data);
-                            console.log(`[Game ${gameNumber}] Result winner:`, parsed.data?.winner);
-                            console.log(`[Game ${gameNumber}] Result score:`, parsed.data?.score);
-                            resultData = parsed.data;
-                        } else if (parsed.type === 'error') {
-                            hasError = true;
-                            errorMessage = parsed.error;
-                            console.error(`[Game ${gameNumber}] Error:`, parsed.error);
-                        }
-                    } catch (e) {
-                        console.warn(`[Game ${gameNumber}] Parse error:`, e.message, 'Data:', data.substring(0, 100));
-                    }
-                }
-            }
-        }
-        
-        console.log(`[Game ${gameNumber}] Final resultData:`, resultData);
-        
-        // 检查是否有错误
-        if (hasError) {
-            throw new Error(errorMessage);
-        }
-        
-        // 移除生成区域
-        const genEl = document.getElementById(`generating-content-${gameNumber}`);
-        if (genEl) {
-            genEl.remove();
-        }
-        
-        // 将思考区域转换为可折叠形式（保留思考内容）
-        const thinkingEl = document.getElementById(`thinking-game-${gameNumber}`);
-        if (thinkingEl && reasoningText) {
-            thinkingEl.innerHTML = `
-                <div class="thinking-collapsed" onclick="toggleThinking(${gameNumber})">
-                    <span class="thinking-toggle" id="thinking-toggle-${gameNumber}">▶</span>
-                    <span class="thinking-summary">第${gameNumber}轮 分析日志 (点击展开/收起)</span>
-                </div>
-                <div class="thinking-detail hidden" id="thinking-detail-${gameNumber}">
-                    ${formatThinking(reasoningText)}
-                </div>
-            `;
-        } else if (thinkingEl) {
-            thinkingEl.remove();
-        }
-        
-        // 处理单场比赛结果
-        console.log(`[Game ${gameNumber}] 准备显示结果, resultData:`, resultData);
-        if (resultData) {
-            console.log(`[Game ${gameNumber}] 调用 displaySingleGameResult...`);
-            await displaySingleGameResult(resultData, gameNumber, logContent);
-            console.log(`[Game ${gameNumber}] displaySingleGameResult 完成`);
-        } else {
-            console.error(`[Game ${gameNumber}] resultData 为空!`);
-            throw new Error(`第${gameNumber}场未收到有效结果`);
-        }
-        
-    } catch (error) {
-        console.error(`第${gameNumber}场模拟失败:`, error);
-        
-        // 重试逻辑
-        if (retryCount < maxRetries) {
-            const thinkingTextEl = document.getElementById(`thinking-content-${gameNumber}`);
-            if (thinkingTextEl) {
-                thinkingTextEl.innerHTML = `
-                    <div class="thinking-label">⚠️ 连接失败，${3}秒后重试...</div>
-                    <div class="thinking-text">${error.message}</div>
-                `;
-            }
-            await sleep(3000);
-            return simulateSingleGame(team1Data, team2Data, gameNumber, logContent, retryCount + 1);
-        }
-        
-        // 重试失败后，使用本地模拟
-        const thinkingEl = document.getElementById(`thinking-game-${gameNumber}`);
-        if (thinkingEl) {
-            thinkingEl.remove();
-        }
-        
-        showToast(`第${gameNumber}轮评估连接失败，使用本地分析`);
-        await simulateGameLocalFallback(gameNumber, logContent);
-    }
-}
-
-// 本地模拟单场比赛 (备用)
-async function simulateGameLocalFallback(gameNumber, logContent) {
-    const team1Power = calculateTeamPower(1);
-    const team2Power = calculateTeamPower(2);
-    
-    const randomFactor1 = 0.85 + Math.random() * 0.3;
-    const randomFactor2 = 0.85 + Math.random() * 0.3;
-    
-    const adjustedPower1 = team1Power * randomFactor1;
-    const adjustedPower2 = team2Power * randomFactor2;
-    
-    const totalPower = adjustedPower1 + adjustedPower2;
-    const team1WinChance = adjustedPower1 / totalPower;
-    
-    const winner = Math.random() < team1WinChance ? 1 : 2;
-    
-    const baseScore = 90 + Math.floor(Math.random() * 30);
-    const scoreDiff = 3 + Math.floor(Math.random() * 20);
-    const winnerScore = baseScore + scoreDiff;
-    const loserScore = baseScore;
-    
-    const result = {
-        winner: winner,
-        score: {
-            team1: winner === 1 ? winnerScore : loserScore,
-            team2: winner === 2 ? winnerScore : loserScore
-        },
-        quarterScores: {
-            team1: [Math.floor(Math.random() * 15) + 20, Math.floor(Math.random() * 15) + 20, Math.floor(Math.random() * 15) + 20, Math.floor(Math.random() * 15) + 20],
-            team2: [Math.floor(Math.random() * 15) + 20, Math.floor(Math.random() * 15) + 20, Math.floor(Math.random() * 15) + 20, Math.floor(Math.random() * 15) + 20]
-        },
-        narrative: '(本地模拟) 这是一场激烈的对决...',
-        mvp: {
-            name: '本地MVP',
-            performance: '表现出色'
-        }
-    };
-    
-    // 调整节得分使其符合总分
-    const team1Total = result.score.team1;
-    const team2Total = result.score.team2;
-    result.quarterScores.team1[3] = team1Total - result.quarterScores.team1[0] - result.quarterScores.team1[1] - result.quarterScores.team1[2];
-    result.quarterScores.team2[3] = team2Total - result.quarterScores.team2[0] - result.quarterScores.team2[1] - result.quarterScores.team2[2];
-    
-    await displaySingleGameResult(result, gameNumber, logContent);
-}
-
-// 显示单场比赛结果
-async function displaySingleGameResult(result, gameNumber, logContent) {
-    console.log(`[displaySingleGameResult] Game ${gameNumber} - Result:`, result);
-    console.log(`[displaySingleGameResult] winner: ${result.winner}, score: ${JSON.stringify(result.score)}`);
-    
-    const winner = result.winner;
-    
-    // 更新比分
-    if (winner === 1) {
-        gameState.battle.team1Wins++;
-    } else {
-        gameState.battle.team2Wins++;
-    }
-    updateBattleScore();
-    
-    // 创建比赛结果条目
-    const logEntry = document.createElement('div');
-    logEntry.className = `log-entry game-entry player${winner}-win`;
-    
-    logEntry.innerHTML = `
-        <div class="game-header">
-            <div class="log-game-num">第${gameNumber}轮评估</div>
-            <div class="game-final-score">
-                <span class="team-label">${getPlayerName(1)}</span>
-                <span class="score ${winner === 1 ? 'winner' : ''}">${result.score?.team1 || 0}</span>
-                <span class="vs">-</span>
-                <span class="score ${winner === 2 ? 'winner' : ''}">${result.score?.team2 || 0}</span>
-                <span class="team-label">${getPlayerName(2)}</span>
-            </div>
-            <div class="series-status">
-                累计评估 ${gameState.battle.team1Wins} - ${gameState.battle.team2Wins}
-            </div>
-        </div>
-        
-        ${result.quarterScores ? `
-        <div class="quarter-scores">
-            <table>
-                <tr>
-                    <th></th><th>P1</th><th>P2</th><th>P3</th><th>P4</th><th>合计</th>
-                </tr>
-                <tr>
-                    <td>${getPlayerName(1)}</td>
-                    ${result.quarterScores.team1.map(q => `<td>${q}</td>`).join('')}
-                    <td class="total">${result.score?.team1 || 0}</td>
-                </tr>
-                <tr>
-                    <td>${getPlayerName(2)}</td>
-                    ${result.quarterScores.team2.map(q => `<td>${q}</td>`).join('')}
-                    <td class="total">${result.score?.team2 || 0}</td>
-                </tr>
-            </table>
-        </div>` : ''}
-        
-        ${result.mvp || result.gameMvp ? `
-        <div class="game-mvp">
-            <span class="mvp-badge">★ 本轮最佳</span>
-            <span class="mvp-name">${(result.mvp || result.gameMvp).name}</span>
-            ${(result.mvp || result.gameMvp).performance ? `<span class="mvp-perf">${(result.mvp || result.gameMvp).performance}</span>` : ''}
-        </div>` : ''}
-        
-        ${result.narrative ? `
-        <div class="game-narrative">
-            <div class="narrative-title">评估过程</div>
-            <div class="narrative-text">${result.narrative}</div>
-        </div>` : ''}
-        
-        ${result.keyMoments && result.keyMoments.length > 0 ? `
-        <div class="key-moments">
-            <div class="moments-title">关键节点</div>
-            <ul class="moments-list">
-                ${result.keyMoments.map(m => `<li>${m}</li>`).join('')}
-            </ul>
-        </div>` : ''}
-        
-        ${result.surpriseEvents && result.surpriseEvents.length > 0 ? `
-        <div class="surprise-events">
-            <div class="surprise-title">特殊因素</div>
-            <div class="surprise-list">
-                ${result.surpriseEvents.map(e => `
-                    <div class="surprise-item">
-                        <span class="surprise-type">${getSurpriseIcon(e.type)} ${e.type}</span>
-                        <span class="surprise-player">👤 ${e.player}</span>
-                        <p class="surprise-desc">${e.description}</p>
-                    </div>
-                `).join('')}
-            </div>
-        </div>` : ''}
-        
-        ${result.team1Stats && result.team1Stats.length > 0 ? `
-        <div class="team-stats-section">
-            <div class="stats-title">📊 ${getPlayerName(1)} 球员数据</div>
-            ${renderPlayerStats(result.team1Stats)}
-        </div>` : ''}
-        
-        ${result.team2Stats && result.team2Stats.length > 0 ? `
-        <div class="team-stats-section">
-            <div class="stats-title">📊 ${getPlayerName(2)} 球员数据</div>
-            ${renderPlayerStats(result.team2Stats)}
-        </div>` : ''}
-        
-        ${result.analysis ? `
-        <div class="game-analysis">
-            <div class="analysis-title">评估分析</div>
-            <div class="analysis-text">${result.analysis}</div>
-        </div>` : ''}
-    `;
-    
-    logContent.appendChild(logEntry);
-    logContent.scrollTop = logContent.scrollHeight;
-}
-
 // 格式化思考内容
 function formatThinking(text) {
     const maxLength = 500;
@@ -1599,147 +2015,6 @@ function formatThinking(text) {
         formatted = '...' + formatted.slice(-maxLength);
     }
     return formatted.replace(/\n/g, '<br>');
-}
-
-// 显示AI模拟结果
-async function displayAIResult(result, logContent) {
-    const thinkingEntry = logContent.querySelector('.ai-thinking');
-    if (thinkingEntry) {
-        thinkingEntry.remove();
-    }
-    
-    // 显示赛前分析
-    if (result.previewAnalysis) {
-        const previewEntry = document.createElement('div');
-        previewEntry.className = 'log-entry preview-analysis';
-        previewEntry.innerHTML = `
-            <div class="log-game-num">评估前瞻</div>
-            <div class="preview-text">${result.previewAnalysis}</div>
-        `;
-        logContent.appendChild(previewEntry);
-        logContent.scrollTop = logContent.scrollHeight;
-        await sleep(1000);
-    }
-    
-    // 显示每场比赛
-    if (result.games && result.games.length > 0) {
-        for (const game of result.games) {
-            await sleep(800);
-            
-            const winner = game.winner;
-            if (winner === 1) {
-                gameState.battle.team1Wins++;
-            } else {
-                gameState.battle.team2Wins++;
-            }
-            updateBattleScore();
-            
-            const logEntry = document.createElement('div');
-            logEntry.className = `log-entry game-entry player${winner}-win`;
-            logEntry.innerHTML = `
-                <div class="game-header">
-                    <div class="log-game-num">第${game.gameNumber}轮评估</div>
-                    <div class="game-final-score">
-                        <span class="team-label">${getPlayerName(1)}</span>
-                        <span class="score ${winner === 1 ? 'winner' : ''}">${game.score.team1}</span>
-                        <span class="vs">-</span>
-                        <span class="score ${winner === 2 ? 'winner' : ''}">${game.score.team2}</span>
-                        <span class="team-label">${getPlayerName(2)}</span>
-                    </div>
-                </div>
-                
-                ${game.quarterScores ? `
-                <div class="quarter-scores">
-                    <table>
-                        <tr>
-                            <th></th><th>P1</th><th>P2</th><th>P3</th><th>P4</th><th>合计</th>
-                        </tr>
-                        <tr>
-                            <td>${getPlayerName(1)}</td>
-                            ${game.quarterScores.team1.map(q => `<td>${q}</td>`).join('')}
-                            <td class="total">${game.score.team1}</td>
-                        </tr>
-                        <tr>
-                            <td>${getPlayerName(2)}</td>
-                            ${game.quarterScores.team2.map(q => `<td>${q}</td>`).join('')}
-                            <td class="total">${game.score.team2}</td>
-                        </tr>
-                    </table>
-                </div>` : ''}
-                
-                ${game.gameMvp || game.mvp ? `
-                <div class="game-mvp">
-                    <span class="mvp-badge">★ 本轮最佳</span>
-                    <span class="mvp-name">${(game.gameMvp || game.mvp).name}</span>
-                    ${(game.gameMvp || game.mvp).performance ? `<span class="mvp-perf">${(game.gameMvp || game.mvp).performance}</span>` : ''}
-                </div>` : ''}
-                
-                ${game.narrative ? `
-                <div class="game-narrative">
-                    <div class="narrative-title">📖 比赛过程</div>
-                    <div class="narrative-text">${game.narrative}</div>
-                </div>` : ''}
-                
-                ${game.keyMoments && game.keyMoments.length > 0 ? `
-                <div class="key-moments">
-                    <div class="moments-title">🔥 关键时刻</div>
-                    <ul class="moments-list">
-                        ${game.keyMoments.map(m => `<li>${m}</li>`).join('')}
-                    </ul>
-                </div>` : ''}
-                
-                ${game.team1Stats && game.team1Stats.length > 0 ? `
-                <div class="team-stats-section">
-                    <div class="stats-title">📊 ${getPlayerName(1)} 球员数据</div>
-                    ${renderPlayerStats(game.team1Stats)}
-                </div>` : ''}
-                
-                ${game.team2Stats && game.team2Stats.length > 0 ? `
-                <div class="team-stats-section">
-                    <div class="stats-title">📊 ${getPlayerName(2)} 球员数据</div>
-                    ${renderPlayerStats(game.team2Stats)}
-                </div>` : ''}
-            `;
-            logContent.appendChild(logEntry);
-            logContent.scrollTop = logContent.scrollHeight;
-        }
-    }
-    
-    await sleep(500);
-    
-    // 显示总决赛MVP
-    if (result.fmvp) {
-        const fmvpEntry = document.createElement('div');
-        fmvpEntry.className = 'log-entry fmvp-award';
-        fmvpEntry.innerHTML = `
-            <div class="log-game-num">★ ${getTerms().bestEmployee}</div>
-            <div class="fmvp-content">
-                <div class="fmvp-name">${result.fmvp.name}</div>
-                ${result.fmvp.avgStats ? `
-                <div class="fmvp-stats">
-                    平均绩效 ${result.fmvp.avgStats.points} ${result.fmvp.avgStats.rebounds} ${result.fmvp.avgStats.assists}
-                </div>` : ''}
-                <div class="fmvp-reason">${result.fmvp.reason}</div>
-            </div>
-        `;
-        logContent.appendChild(fmvpEntry);
-    }
-    
-    // 显示系列赛总结
-    if (result.seriesSummary || result.seriesAnalysis) {
-        const summaryEntry = document.createElement('div');
-        summaryEntry.className = 'log-entry series-summary';
-        summaryEntry.innerHTML = `
-            <div class="log-game-num">评估总结</div>
-            <div class="summary-text">${result.seriesSummary || result.seriesAnalysis}</div>
-        `;
-        logContent.appendChild(summaryEntry);
-    }
-    
-    await sleep(300);
-    
-    const champion = result.champion || (gameState.battle.team1Wins >= 4 ? 1 : 2);
-    showChampion(champion, result.fmvp);
 }
 
 // 渲染球员数据统计表格
@@ -2132,6 +2407,22 @@ function toggleThinking(gameNumber) {
         } else {
             detail.classList.add('hidden');
             toggle.textContent = '▶';
+        }
+    }
+}
+
+// 切换思考框的展开/折叠
+function toggleThinkingBox() {
+    const body = document.getElementById('thinking-body');
+    const icon = document.getElementById('thinking-toggle-icon');
+    
+    if (body && icon) {
+        if (body.classList.contains('collapsed')) {
+            body.classList.remove('collapsed');
+            icon.textContent = '▼';
+        } else {
+            body.classList.add('collapsed');
+            icon.textContent = '▶';
         }
     }
 }

@@ -8,8 +8,11 @@ import sys
 import json
 import httpx
 import re
+import uuid
+from datetime import datetime
 from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -24,6 +27,37 @@ load_dotenv(os.path.join(SCRIPT_DIR, '.env'), override=False)
 
 app = Flask(__name__, static_folder='.')
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# 房间管理
+rooms = {}  # {room_id: room_state}
+
+class Room:
+    def __init__(self, room_id, creator_sid, creator_name):
+        self.room_id = room_id
+        self.players = {
+            '1': {'sid': creator_sid, 'name': creator_name, 'ready': False},
+            '2': None
+        }
+        self.game_state = {
+            'phase': 'waiting',  # waiting, selection, battle, finished
+            'selection_phase': 'draw',  # draw = 抽队伍, pick = 选球员
+            'current_player': None,
+            'round': 0,
+            'teams': {'1': {}, '2': {}},
+            'budgets': {'1': 11, '2': 11},
+            'used_teams': {'1': [], '2': []},
+            'drawn_team': None,
+            'drawn_players': []
+        }
+        self.created_at = datetime.now()
+    
+    def to_dict(self):
+        return {
+            'room_id': self.room_id,
+            'players': self.players,
+            'game_state': self.game_state
+        }
 
 # DeepSeek API 配置（不要在代码中硬编码密钥）
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
@@ -190,7 +224,7 @@ def build_simple_series_prompt(team1, team2, player_names):
     team1_players = format_player_list(team1)
     team2_players = format_player_list(team2)
     
-    return f"""请模拟NBA总决赛BO7系列赛，进行深度战术分析后给出结果。
+    return f"""请模拟以下两支球队的NBA总决赛BO7系列赛：
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【{p1_name}阵容】
@@ -200,39 +234,12 @@ def build_simple_series_prompt(team1, team2, player_names):
 {team2_desc}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-【请先分析以下维度，再模拟比赛】
-
-📊 **空间分析**：各队有几个可靠的投射点？内线是否会堵塞空间？
-
-🎯 **组织分析**：谁是主要组织者？是否有足够的传球和控球能力？
-
-⚔️ **进攻火力**：得分手段是否多样？关键时刻谁来终结？
-
-🛡️ **防守体系**：各位置防守能力如何？是否有明显漏洞会被针对？
-
-🤝 **化学反应**：球星之间是否兼容？球权如何分配？打法是否互补？
-
-⭐ **球星成色与赛季状态**：球员处于巅峰还是末期？该赛季的真实能力如何？
-
 【比赛规则】
 - 10名球员全部打满48分钟，无换人
 - 第1、2、5、7场为{p1_name}主场，第3、4、6场为{p2_name}主场
-- 主场球队有轻微优势
 - 系列赛先赢4场者夺冠
 
-【数据要求 - 严格按赛季状态】
-⚠️ 同一球员不同赛季能力差异巨大！必须按标注赛季模拟：
-- 巅峰赛季球员：高得分、高效率、全面数据
-- 新秀/成长期球员：潜力但不稳定，数据有起伏
-- 职业末期球员：数据明显下滑，体能受限，但可能有经验优势
-- 伤病赛季球员：能力大打折扣
-
-📊 数据规范：
-- 每位球员的数据必须符合其标注赛季的历史真实水平
-- 巅峰球星得分20-35分，角色球员8-15分
-- 五名球员得分之和必须等于球队总得分
-
-请严格按照以下JSON格式返回结果：
+【输出格式 - 严格按JSON返回】
 {{
     "teamAnalysis": {{
         "team1": {{
@@ -245,17 +252,8 @@ def build_simple_series_prompt(team1, team2, player_names):
             "strengths": "主要优势",
             "weaknesses": "主要弱点"
         }},
-        "team2": {{
-            "spacing": "空间评价",
-            "playmaking": "组织评价",
-            "offense": "进攻评价", 
-            "defense": "防守评价",
-            "chemistry": "化学反应评价",
-            "starPower": "球星成色评价",
-            "strengths": "主要优势",
-            "weaknesses": "主要弱点"
-        }},
-        "keyMatchups": "关键对位分析，哪些对位决定比赛走向",
+        "team2": {{同上}},
+        "keyMatchups": "关键对位分析",
         "prediction": "赛前预测和理由"
     }},
     "champion": 1或2,
@@ -265,32 +263,20 @@ def build_simple_series_prompt(team1, team2, player_names):
             "gameNumber": 场次,
             "winner": 1或2,
             "score": {{"team1": 得分, "team2": 得分}},
-            "keyFactor": "本场胜负关键因素(30字内)",
-            "team1Stats": [
-                {{"name": "球员名", "points": 得分, "rebounds": 篮板, "assists": 助攻, "steals": 抢断, "blocks": 盖帽, "fgm": 投篮命中, "fga": 投篮出手, "tpm": 三分命中, "tpa": 三分出手}}
-            ],
-            "team2Stats": [
-                {{"name": "球员名", "points": 得分, "rebounds": 篮板, "assists": 助攻, "steals": 抢断, "blocks": 盖帽, "fgm": 投篮命中, "fga": 投篮出手, "tpm": 三分命中, "tpa": 三分出手}}
-            ]
+            "keyFactor": "本场胜负关键因素"
         }}
     ],
     "fmvp": {{
         "name": "总决赛MVP球员名",
         "team": 1或2,
         "avgStats": {{"points": 场均得分, "rebounds": 场均篮板, "assists": 场均助攻}},
-        "reason": "获选理由(50字内，说明为何是他而不是其他人)"
+        "reason": "获选理由(50字内)"
     }},
-    "summary": "系列赛总结(100字左右)，包含关键转折点和决定性因素"
+    "summary": "系列赛总结(100字左右)"
 }}
 
 【{p1_name}球员】：{team1_players}
-【{p2_name}球员】：{team2_players}
-
-【⚠️ 数据校验】
-1. 每队5名球员的得分之和 = 球队总得分
-2. 投篮命中数要合理：fgm ≤ fga，tpm ≤ tpa
-3. 得分公式：points = (fgm - tpm) × 2 + tpm × 3 + 罚球得分
-4. FMVP必须来自冠军球队"""
+【{p2_name}球员】：{team2_players}"""
 
 
 def format_team(team, team_name):
@@ -567,6 +553,380 @@ def update_player(player_id):
             return jsonify({'success': False, 'error': str(e)})
 
 
+# ========================================
+# WebSocket 事件处理 - 多人在线对战
+# ========================================
+
+@socketio.on('connect')
+def handle_connect():
+    print(f"[WebSocket] 客户端已连接: {request.sid}", flush=True)
+    emit('connected', {'sid': request.sid})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print(f"[WebSocket] 客户端断开连接: {request.sid}", flush=True)
+    # 查找并移除断开连接的玩家
+    for room_id, room in list(rooms.items()):
+        for player_num, player_info in room.players.items():
+            if player_info and player_info['sid'] == request.sid:
+                # 通知房间内其他玩家
+                emit('player_left', {
+                    'player_num': player_num,
+                    'message': f"{player_info['name']} 离开了房间"
+                }, room=room_id)
+                # 如果房间为空则删除
+                if all(p is None or p['sid'] == request.sid for p in room.players.values()):
+                    del rooms[room_id]
+                    print(f"[房间] 房间 {room_id} 已删除", flush=True)
+                break
+
+@socketio.on('create_room')
+def handle_create_room(data):
+    """创建房间"""
+    room_id = str(uuid.uuid4())[:8]
+    player_name = data.get('player_name', 'A组')
+    
+    room = Room(room_id, request.sid, player_name)
+    rooms[room_id] = room
+    
+    join_room(room_id)
+    
+    print(f"[房间] 创建房间 {room_id}, 玩家: {player_name}", flush=True)
+    emit('room_created', {
+        'room_id': room_id,
+        'player_num': '1',
+        'room_state': room.to_dict()
+    })
+
+@socketio.on('join_room')
+def handle_join_room(data):
+    """加入房间"""
+    room_id = data.get('room_id')
+    player_name = data.get('player_name', 'B组')
+    
+    if room_id not in rooms:
+        emit('error', {'message': '房间不存在'})
+        return
+    
+    room = rooms[room_id]
+    
+    if room.players['2'] is not None:
+        emit('error', {'message': '房间已满'})
+        return
+    
+    room.players['2'] = {'sid': request.sid, 'name': player_name, 'ready': False}
+    join_room(room_id)
+    
+    print(f"[房间] 玩家 {player_name} 加入房间 {room_id}", flush=True)
+    
+    # 通知房间内所有玩家
+    emit('player_joined', {
+        'player_num': '2',
+        'player_name': player_name,
+        'room_state': room.to_dict()
+    }, room=room_id)
+    
+    # 给新加入的玩家发送房间状态
+    emit('room_joined', {
+        'room_id': room_id,
+        'player_num': '2',
+        'room_state': room.to_dict()
+    })
+
+@socketio.on('ready')
+def handle_ready(data):
+    """玩家准备"""
+    room_id = data.get('room_id')
+    player_num = str(data.get('player_num'))  # 确保是字符串
+    
+    if room_id not in rooms:
+        return
+    
+    room = rooms[room_id]
+    room.players[player_num]['ready'] = True
+    
+    # 检查是否双方都准备好
+    if room.players['2'] and room.players['1']['ready'] and room.players['2']['ready']:
+        room.game_state['phase'] = 'selection'  # 与客户端保持一致
+        room.game_state['current_player'] = '1'
+        room.game_state['round'] = 1
+        print(f"[房间] 房间 {room_id} 游戏开始", flush=True)
+    
+    emit('player_ready', {
+        'player_num': player_num,
+        'room_state': room.to_dict()
+    }, room=room_id)
+
+@socketio.on('select_team')
+def handle_select_team(data):
+    """选择队伍"""
+    room_id = data.get('room_id')
+    player_num = str(data.get('player_num'))  # 确保是字符串
+    team_code = data.get('team_code')
+    
+    if room_id not in rooms:
+        return
+    
+    room = rooms[room_id]
+    
+    if room.game_state['current_player'] != player_num:
+        emit('error', {'message': '还没轮到你操作'})
+        return
+    
+    if team_code in room.game_state['used_teams']['1'] + room.game_state['used_teams']['2']:
+        emit('error', {'message': '该队伍已被选择'})
+        return
+    
+    room.game_state['used_teams'][player_num].append(team_code)
+    room.game_state['drawn_team'] = team_code
+    room.game_state['selection_phase'] = 'pick'  # 切换到选球员阶段
+    
+    print(f"[房间] 玩家 {player_num} 选择了队伍 {team_code}", flush=True)
+    
+    emit('team_selected', {
+        'player_num': player_num,
+        'team_code': team_code,
+        'room_state': room.to_dict()
+    }, room=room_id)
+
+@socketio.on('select_player')
+def handle_select_player(data):
+    """选择球员"""
+    room_id = data.get('room_id')
+    player_num = str(data.get('player_num'))  # 确保是字符串
+    player_data = data.get('player_data')
+    position = data.get('position')
+    
+    if room_id not in rooms:
+        return
+    
+    room = rooms[room_id]
+    
+    if room.game_state['current_player'] != player_num:
+        emit('error', {'message': '还没轮到你操作'})
+        return
+    
+    # 更新阵容
+    room.game_state['teams'][player_num][position] = player_data
+    room.game_state['budgets'][player_num] -= player_data['cost']
+    
+    # 检查是否选满了
+    both_full = (len(room.game_state['teams']['1']) == 5 and 
+                 len(room.game_state['teams']['2']) == 5)
+    
+    if both_full:
+        room.game_state['phase'] = 'battle'
+        room.game_state['current_player'] = None
+        room.game_state['selection_phase'] = 'draw'
+        print(f"[房间] 双方选满，进入对战阶段", flush=True)
+    else:
+        # 切换到下一个玩家
+        next_player = '2' if player_num == '1' else '1'
+        room.game_state['current_player'] = next_player
+        room.game_state['round'] += 1
+        room.game_state['drawn_team'] = None
+        room.game_state['selection_phase'] = 'draw'  # 重置为抽队伍阶段
+        print(f"[房间] 玩家 {player_num} 选完，切换到玩家 {next_player}，当前轮次 {room.game_state['round']}", flush=True)
+    
+    print(f"[房间] 玩家 {player_num} 选择了球员 {player_data['name']} ({position})", flush=True)
+    
+    emit('player_selected', {
+        'player_num': player_num,
+        'player_data': player_data,
+        'position': position,
+        'room_state': room.to_dict()
+    }, room=room_id)
+
+@socketio.on('skip_turn')
+def handle_skip_turn(data):
+    """跳过回合"""
+    room_id = data.get('room_id')
+    player_num = str(data.get('player_num'))  # 确保是字符串
+    
+    if room_id not in rooms:
+        return
+    
+    room = rooms[room_id]
+    
+    if room.game_state['current_player'] != player_num:
+        emit('error', {'message': '还没轮到你操作'})
+        return
+    
+    # 切换到下一个玩家
+    room.game_state['current_player'] = '2' if player_num == '1' else '1'
+    room.game_state['round'] += 1
+    room.game_state['drawn_team'] = None
+    room.game_state['selection_phase'] = 'draw'  # 重置为抽队伍阶段
+    
+    print(f"[房间] 玩家 {player_num} 跳过了回合", flush=True)
+    
+    emit('turn_skipped', {
+        'player_num': player_num,
+        'room_state': room.to_dict()
+    }, room=room_id)
+
+@socketio.on('request_battle')
+def handle_request_battle(data):
+    """请求开始对战"""
+    room_id = data.get('room_id')
+    
+    if room_id not in rooms:
+        return
+    
+    room = rooms[room_id]
+    
+    # 通知房间内所有玩家开始对战
+    emit('battle_ready', {
+        'teams': room.game_state['teams'],
+        'player_names': {
+            '1': room.players['1']['name'],
+            '2': room.players['2']['name']
+        }
+    }, room=room_id)
+
+@socketio.on('start_battle')
+def handle_start_battle(data):
+    """开始对战模拟（广播给房间内所有玩家）"""
+    room_id = data.get('room_id')
+    team1 = data.get('team1', {})
+    team2 = data.get('team2', {})
+    player_names = data.get('playerNames', {'1': 'A组', '2': 'B组'})
+    
+    if room_id not in rooms:
+        return
+    
+    print(f"[对战] 房间 {room_id} 开始对战模拟", flush=True)
+    
+    # 通知所有玩家对战开始
+    socketio.emit('battle_started', {
+        'message': '对战模拟开始'
+    }, room=room_id)
+    
+    # 构建提示词
+    prompt = build_simple_series_prompt(team1, team2, player_names)
+    
+    # 系统提示词
+    system_prompt = """你是一位顶级NBA战术分析师和数据专家，拥有深厚的篮球战术理解和历史知识。你需要模拟NBA总决赛BO7系列赛。
+
+【⚠️ 核心规则 - 严格按赛季状态模拟】
+球员名称格式为"XX赛季的XX球员"，必须严格按照该赛季该球队的真实状态模拟！
+
+🔴 **同一球员不同赛季差异巨大，必须区分：**
+- 火箭大梦(1994) vs 猛龙大梦(2001)：巅峰统治力 vs 职业末期角色球员
+- 热火詹姆斯(2013) vs 湖人詹姆斯(2023)：巅峰身体素质 vs 老年智慧型打法
+- 公牛乔丹(1996) vs 奇才乔丹(2002)：历史最佳 vs 退役复出
+- 湖人科比(2006) vs 湖人科比(2015)：得分王 vs 跟腱断裂后
+- 马刺邓肯(2003) vs 马刺邓肯(2015)：攻防一体 vs 防守蓝领
+
+📊 **模拟时必须考虑该赛季的：**
+- 球员年龄和身体状态（爆发力、速度、耐久性）
+- 在球队的角色定位（核心/二当家/角色球员）
+- 该赛季的真实数据表现（得分、效率、出场时间）
+- 伤病影响（大伤后的球员能力会明显下降）
+- 球队体系中的战术地位
+
+【🏀 球队战术体系分析维度】
+你必须从以下维度深入分析双方球队，并据此模拟比赛：
+
+1. **空间与投射**
+   - 场上球员的三分/中投威胁如何？能否拉开空间？
+   - 是否有多个投射点？还是空间拥挤？
+   - 内线球员是否有投射能力？会不会堵塞禁区？
+
+2. **组织与传球**
+   - 谁是主要组织者？组织能力如何？
+   - 传球视野和失误控制
+   - 是否有多个持球点？还是过度依赖单一组织者？
+
+3. **进攻火力**
+   - 得分手段是否多样？（突破、中投、三分、背身）
+   - 进攻效率和终结能力
+   - 关键时刻的得分能力（clutch能力）
+
+4. **防守体系**
+   - 个人防守能力：护框、外线防守、协防意识
+   - 是否有防守漏洞？错位会被针对吗？
+   - 篮板球控制能力
+
+5. **球权分配与化学反应**
+   - 核心球员是谁？球权如何分配？
+   - 多个球星是否能共存？会不会球权冲突？
+   - 球员打法是否兼容？是否互补？
+
+6. **球星成色与赛季状态**
+   - 该赛季球员处于什么阶段？（巅峰/上升期/下滑期/末期）
+   - 球员的历史地位和荣誉
+   - 季后赛/总决赛大赛经验
+   - 领袖气质和关键球能力
+   - ⚠️ 注意：同一球员不同赛季实力可能天差地别！
+
+【🎯 模拟原则】
+1. 阵容搭配合理的球队有优势（空间+组织+防守平衡）
+2. 球星扎堆但不兼容的阵容会有问题（球权冲突、空间拥挤）
+3. 有明显防守漏洞的球队会被针对
+4. 系列赛要有起伏，体现真实的竞技对抗
+5. 考虑主场优势（1、2、5、7场为team1主场）
+
+【🏆 FMVP评选标准】
+- 必须来自冠军球队
+- 综合考虑：场均数据、关键比赛表现、对胜利的贡献度
+- 不一定是数据最好的球员，而是对夺冠贡献最大的球员
+
+【重要】你必须严格按照JSON格式返回结果。"""
+    
+    try:
+        # 调用 DeepSeek API
+        response = client.chat.completions.create(
+            model="deepseek-reasoner",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            stream=True
+        )
+        
+        reasoning_content = ""
+        final_content = ""
+        
+        for chunk in response:
+            delta = chunk.choices[0].delta
+            if delta.reasoning_content:
+                reasoning_content += delta.reasoning_content
+                # 广播思考过程
+                socketio.emit('battle_stream', {
+                    'type': 'reasoning',
+                    'content': delta.reasoning_content
+                }, room=room_id)
+            elif delta.content:
+                final_content += delta.content
+                # 广播生成内容
+                socketio.emit('battle_stream', {
+                    'type': 'content',
+                    'content': delta.content
+                }, room=room_id)
+        
+        # 解析结果
+        result = extract_json(final_content)
+        
+        # 广播最终结果
+        socketio.emit('battle_stream', {
+            'type': 'result',
+            'data': result
+        }, room=room_id)
+        
+        print(f"[对战] 房间 {room_id} 对战模拟完成", flush=True)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        # 广播错误
+        socketio.emit('battle_stream', {
+            'type': 'error',
+            'error': str(e)
+        }, room=room_id)
+        print(f"[对战] 房间 {room_id} 对战模拟失败: {str(e)}", flush=True)
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 7860))
     print("=" * 50)
@@ -576,5 +936,5 @@ if __name__ == '__main__':
     print(f"访问地址: http://0.0.0.0:{port}")
     print("=" * 50)
     
-    app.run(host='0.0.0.0', port=port, debug=False)
+    socketio.run(app, host='0.0.0.0', port=port, debug=False)
 
