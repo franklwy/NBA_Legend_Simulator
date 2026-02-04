@@ -2917,11 +2917,6 @@ header {
     margin-bottom: 0;
 }
 
-.lobby-rules .rule-note {
-    margin-top: 10px;
-    color: var(--text-secondary);
-    font-size: 13px;
-}
 
 .player-name-input-group {
     margin-bottom: 20px;
