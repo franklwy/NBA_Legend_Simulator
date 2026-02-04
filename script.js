@@ -622,7 +622,7 @@ function createLiveOutputBox() {
 // ========================================
 // 显示模式配置
 // ========================================
-let displayMode = localStorage.getItem('displayMode') || 'office'; // 'office' 或 'nba'
+let displayMode = localStorage.getItem('displayMode') || 'nba'; // 'office' 或 'nba'
 
 // 术语映射表
 const terminology = {
