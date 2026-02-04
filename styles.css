@@ -2886,6 +2886,43 @@ header {
     line-height: 1.6;
 }
 
+.lobby-rules {
+    margin-top: 20px;
+    padding: 16px 18px;
+    background: var(--gray-50);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+}
+
+.lobby-rules h2 {
+    margin: 0 0 10px 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.lobby-rules ul {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.lobby-rules li {
+    margin-bottom: 6px;
+}
+
+.lobby-rules li:last-child {
+    margin-bottom: 0;
+}
+
+.lobby-rules .rule-note {
+    margin-top: 10px;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
 .player-name-input-group {
     margin-bottom: 20px;
 }
