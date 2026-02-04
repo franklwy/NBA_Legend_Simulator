@@ -1602,6 +1602,50 @@ header {
     font-weight: 600;
 }
 
+/* 再来一局按钮组 */
+.rematch-buttons {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 24px;
+}
+
+.rematch-btn, .leave-btn {
+    padding: 10px 24px;
+    border-radius: 6px;
+    border: none;
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.rematch-btn {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.rematch-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.rematch-btn:disabled {
+    background: var(--gray-600);
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.leave-btn {
+    background: var(--gray-700);
+    color: var(--text-primary);
+}
+
+.leave-btn:hover {
+    background: var(--gray-600);
+    transform: translateY(-2px);
+}
+
 /* 彩带效果 - 简化版 */
 .confetti-container {
     display: none;

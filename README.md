@@ -1,7 +1,7 @@
 ---
 title: NBA Legend Simulator
 emoji: 🏀
-colorFrom: orange
+colorFrom: yellow
 colorTo: red
 sdk: docker
 pinned: false

@@ -3,12 +3,18 @@
 # 使用 DeepSeek V3.2 思考模式进行智能对战模拟
 # ========================================
 
+# ⚠️ 必须在最开始进行 eventlet monkey patching
+# 这样才能让所有的阻塞操作（包括API调用）变为非阻塞
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import sys
 import json
-import httpx
 import re
 import uuid
+import time
+import random
 from datetime import datetime
 from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
@@ -27,7 +33,18 @@ load_dotenv(os.path.join(SCRIPT_DIR, '.env'), override=False)
 
 app = Flask(__name__, static_folder='.')
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*",
+    async_mode='eventlet',
+    ping_timeout=600,  # 10分钟（充足的思考时间）
+    ping_interval=25,  # 25秒发送一次服务端心跳
+    logger=True,  # 启用日志以便调试
+    engineio_logger=True,
+    max_http_buffer_size=5e6,  # 5MB缓冲区
+    always_connect=False,
+    max_connections=100
+)
 
 # 房间管理
 rooms = {}  # {room_id: room_state}
@@ -51,6 +68,7 @@ class Room:
             'drawn_players': []
         }
         self.created_at = datetime.now()
+        self.rematch_requests = set()  # 记录请求再来一局的玩家
     
     def to_dict(self):
         return {
@@ -58,23 +76,40 @@ class Room:
             'players': self.players,
             'game_state': self.game_state
         }
+    
+    def reset_game_state(self):
+        """重置游戏状态，用于再来一局"""
+        self.game_state = {
+            'phase': 'waiting',  # 重置为等待阶段，需要双方重新准备
+            'selection_phase': 'draw',
+            'current_player': None,  # 等待阶段没有当前玩家
+            'round': 0,  # 等待阶段回合为0
+            'teams': {
+                '1': {},  # 空字典表示没有选择任何球员
+                '2': {}
+            },
+            'budgets': {'1': 11, '2': 11},
+            'used_teams': {'1': [], '2': []},
+            'drawn_team': None,
+            'drawn_players': []
+        }
+        self.rematch_requests.clear()
+        # 重置玩家准备状态
+        for player_num in self.players:
+            if self.players[player_num]:
+                self.players[player_num]['ready'] = False
 
 # DeepSeek API 配置（不要在代码中硬编码密钥）
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
-# 创建不使用代理的HTTP客户端
-http_client = httpx.Client(
-    timeout=httpx.Timeout(300.0, connect=60.0),
-    proxy=None,  # 禁用代理
-    trust_env=False,  # 不读取系统代理设置
-)
-
-# 初始化 OpenAI 客户端 (绕过系统代理)
+# 初始化 OpenAI 客户端
+# 注意：在 eventlet 环境下，不使用自定义 http_client
+# OpenAI SDK 会自动使用 httpx，eventlet 的 monkey patch 会处理好
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url=DEEPSEEK_BASE_URL,
-    http_client=http_client,
+    timeout=300.0,
     max_retries=3  # 自动重试3次
 )
 
@@ -564,26 +599,43 @@ def handle_connect():
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print(f"[WebSocket] 客户端断开连接: {request.sid}", flush=True)
-    # 查找并移除断开连接的玩家
-    for room_id, room in list(rooms.items()):
-        for player_num, player_info in room.players.items():
-            if player_info and player_info['sid'] == request.sid:
-                # 通知房间内其他玩家
-                emit('player_left', {
-                    'player_num': player_num,
-                    'message': f"{player_info['name']} 离开了房间"
-                }, room=room_id)
-                # 如果房间为空则删除
-                if all(p is None or p['sid'] == request.sid for p in room.players.values()):
-                    del rooms[room_id]
-                    print(f"[房间] 房间 {room_id} 已删除", flush=True)
-                break
+    try:
+        print(f"[WebSocket] 客户端断开连接: {request.sid}", flush=True)
+        # 查找并移除断开连接的玩家
+        for room_id, room in list(rooms.items()):
+            for player_num, player_info in room.players.items():
+                if player_info and player_info['sid'] == request.sid:
+                    # 通知房间内其他玩家
+                    socketio.emit('player_left', {
+                        'player_num': player_num,
+                        'message': f"{player_info['name']} 离开了房间"
+                    }, room=room_id)
+                    # 如果房间为空则删除
+                    if all(p is None or p['sid'] == request.sid for p in room.players.values()):
+                        del rooms[room_id]
+                        print(f"[房间] 房间 {room_id} 已删除", flush=True)
+                    break
+    except Exception as e:
+        import traceback
+        print(f"[WebSocket] handle_disconnect 发生错误: {str(e)}", flush=True)
+        traceback.print_exc()
+
+@socketio.on('ping')
+def handle_ping(data):
+    """处理客户端心跳保活"""
+    timestamp = data.get('timestamp', 0)
+    print(f"[心跳] 收到客户端 ping, 时间戳: {timestamp}, SID: {request.sid}", flush=True)
+    emit('pong', {'timestamp': timestamp, 'server_time': int(time.time() * 1000)})
 
 @socketio.on('create_room')
 def handle_create_room(data):
     """创建房间"""
-    room_id = str(uuid.uuid4())[:8]
+    # 生成6位纯数字房间号，确保不重复
+    while True:
+        room_id = str(random.randint(100000, 999999))
+        if room_id not in rooms:
+            break
+    
     player_name = data.get('player_name', 'A组')
     
     room = Room(room_id, request.sid, player_name)
@@ -601,26 +653,32 @@ def handle_create_room(data):
 @socketio.on('join_room')
 def handle_join_room(data):
     """加入房间"""
+    print(f"[房间] 收到 join_room 请求: {data}", flush=True)
     room_id = data.get('room_id')
     player_name = data.get('player_name', 'B组')
     
+    print(f"[房间] 房间ID: {room_id}, 玩家名: {player_name}", flush=True)
+    print(f"[房间] 当前所有房间: {list(rooms.keys())}", flush=True)
+    
     if room_id not in rooms:
-        emit('error', {'message': '房间不存在'})
+        print(f"[房间] 错误: 房间 {room_id} 不存在", flush=True)
+        emit('error', {'message': f'房间 {room_id} 不存在'})
         return
     
     room = rooms[room_id]
     
     if room.players['2'] is not None:
+        print(f"[房间] 错误: 房间 {room_id} 已满", flush=True)
         emit('error', {'message': '房间已满'})
         return
     
     room.players['2'] = {'sid': request.sid, 'name': player_name, 'ready': False}
     join_room(room_id)
     
-    print(f"[房间] 玩家 {player_name} 加入房间 {room_id}", flush=True)
+    print(f"[房间] 玩家 {player_name} (SID: {request.sid}) 成功加入房间 {room_id}", flush=True)
     
     # 通知房间内所有玩家
-    emit('player_joined', {
+    socketio.emit('player_joined', {
         'player_num': '2',
         'player_name': player_name,
         'room_state': room.to_dict()
@@ -632,6 +690,70 @@ def handle_join_room(data):
         'player_num': '2',
         'room_state': room.to_dict()
     })
+
+@socketio.on('rejoin_room')
+def handle_rejoin_room(data):
+    """重新加入房间（断线恢复）"""
+    try:
+        room_id = data.get('room_id')
+        player_num = str(data.get('player_num'))
+        
+        print(f"[房间] 收到 rejoin_room 请求: room_id={room_id}, player_num={player_num}, sid={request.sid}", flush=True)
+        
+        if room_id not in rooms:
+            print(f"[房间] 错误: 房间 {room_id} 不存在", flush=True)
+            emit('room_rejoined', {
+                'success': False,
+                'message': '房间不存在或已过期'
+            })
+            return
+        
+        room = rooms[room_id]
+        
+        # 检查玩家是否属于这个房间
+        if player_num not in ['1', '2'] or room.players[player_num] is None:
+            print(f"[房间] 错误: 玩家 {player_num} 不在房间 {room_id} 中", flush=True)
+            emit('room_rejoined', {
+                'success': False,
+                'message': '您不在这个房间中'
+            })
+            return
+        
+        # 更新玩家的 Socket ID（因为重连后 SID 会变化）
+        old_sid = room.players[player_num]['sid']
+        room.players[player_num]['sid'] = request.sid
+        print(f"[房间] 更新玩家 {player_num} 的 SID: {old_sid} -> {request.sid}", flush=True)
+        
+        # 重新加入房间（Socket.IO 房间）
+        join_room(room_id)
+        
+        # 返回完整的房间状态
+        emit('room_rejoined', {
+            'success': True,
+            'room_id': room_id,
+            'player_num': player_num,
+            'room_state': room.to_dict(),
+            'message': '成功恢复游戏状态'
+        })
+        
+        # 通知房间内其他玩家
+        other_player = '2' if player_num == '1' else '1'
+        if room.players[other_player]:
+            socketio.emit('player_reconnected', {
+                'player_num': player_num,
+                'player_name': room.players[player_num]['name']
+            }, room=room_id, skip_sid=request.sid)
+        
+        print(f"[房间] 玩家 {player_num} 成功重连房间 {room_id}", flush=True)
+        
+    except Exception as e:
+        print(f"[房间] rejoin_room 错误: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        emit('room_rejoined', {
+            'success': False,
+            'message': f'重连失败: {str(e)}'
+        })
 
 @socketio.on('ready')
 def handle_ready(data):
@@ -652,7 +774,7 @@ def handle_ready(data):
         room.game_state['round'] = 1
         print(f"[房间] 房间 {room_id} 游戏开始", flush=True)
     
-    emit('player_ready', {
+    socketio.emit('player_ready', {
         'player_num': player_num,
         'room_state': room.to_dict()
     }, room=room_id)
@@ -660,82 +782,116 @@ def handle_ready(data):
 @socketio.on('select_team')
 def handle_select_team(data):
     """选择队伍"""
-    room_id = data.get('room_id')
-    player_num = str(data.get('player_num'))  # 确保是字符串
-    team_code = data.get('team_code')
-    
-    if room_id not in rooms:
-        return
-    
-    room = rooms[room_id]
-    
-    if room.game_state['current_player'] != player_num:
-        emit('error', {'message': '还没轮到你操作'})
-        return
-    
-    if team_code in room.game_state['used_teams']['1'] + room.game_state['used_teams']['2']:
-        emit('error', {'message': '该队伍已被选择'})
-        return
-    
-    room.game_state['used_teams'][player_num].append(team_code)
-    room.game_state['drawn_team'] = team_code
-    room.game_state['selection_phase'] = 'pick'  # 切换到选球员阶段
-    
-    print(f"[房间] 玩家 {player_num} 选择了队伍 {team_code}", flush=True)
-    
-    emit('team_selected', {
-        'player_num': player_num,
-        'team_code': team_code,
-        'room_state': room.to_dict()
-    }, room=room_id)
+    try:
+        room_id = data.get('room_id')
+        player_num = str(data.get('player_num'))  # 确保是字符串
+        team_code = data.get('team_code')
+        
+        print(f"[房间] 收到 select_team 事件: room={room_id}, player={player_num}, team={team_code}", flush=True)
+        
+        if room_id not in rooms:
+            print(f"[房间] 错误: 房间 {room_id} 不存在", flush=True)
+            emit('error', {'message': '房间不存在'})
+            return
+        
+        room = rooms[room_id]
+        
+        if room.game_state['current_player'] != player_num:
+            print(f"[房间] 错误: 当前玩家是 {room.game_state['current_player']}，不是 {player_num}", flush=True)
+            emit('error', {'message': '还没轮到你操作'})
+            return
+        
+        if team_code in room.game_state['used_teams']['1'] + room.game_state['used_teams']['2']:
+            print(f"[房间] 错误: 队伍 {team_code} 已被选择", flush=True)
+            emit('error', {'message': '该队伍已被选择'})
+            return
+        
+        room.game_state['used_teams'][player_num].append(team_code)
+        room.game_state['drawn_team'] = team_code
+        room.game_state['selection_phase'] = 'pick'  # 切换到选球员阶段
+        
+        print(f"[房间] 玩家 {player_num} 选择了队伍 {team_code}", flush=True)
+        
+        socketio.emit('team_selected', {
+            'player_num': player_num,
+            'team_code': team_code,
+            'room_state': room.to_dict()
+        }, room=room_id)
+        print(f"[房间] team_selected 事件已广播", flush=True)
+        
+    except Exception as e:
+        import traceback
+        print(f"[房间] handle_select_team 发生错误: {str(e)}", flush=True)
+        traceback.print_exc()
+        emit('error', {'message': f'服务器错误: {str(e)}'})
 
 @socketio.on('select_player')
 def handle_select_player(data):
     """选择球员"""
-    room_id = data.get('room_id')
-    player_num = str(data.get('player_num'))  # 确保是字符串
-    player_data = data.get('player_data')
-    position = data.get('position')
-    
-    if room_id not in rooms:
-        return
-    
-    room = rooms[room_id]
-    
-    if room.game_state['current_player'] != player_num:
-        emit('error', {'message': '还没轮到你操作'})
-        return
-    
-    # 更新阵容
-    room.game_state['teams'][player_num][position] = player_data
-    room.game_state['budgets'][player_num] -= player_data['cost']
-    
-    # 检查是否选满了
-    both_full = (len(room.game_state['teams']['1']) == 5 and 
-                 len(room.game_state['teams']['2']) == 5)
-    
-    if both_full:
-        room.game_state['phase'] = 'battle'
-        room.game_state['current_player'] = None
-        room.game_state['selection_phase'] = 'draw'
-        print(f"[房间] 双方选满，进入对战阶段", flush=True)
-    else:
-        # 切换到下一个玩家
-        next_player = '2' if player_num == '1' else '1'
-        room.game_state['current_player'] = next_player
-        room.game_state['round'] += 1
-        room.game_state['drawn_team'] = None
-        room.game_state['selection_phase'] = 'draw'  # 重置为抽队伍阶段
-        print(f"[房间] 玩家 {player_num} 选完，切换到玩家 {next_player}，当前轮次 {room.game_state['round']}", flush=True)
-    
-    print(f"[房间] 玩家 {player_num} 选择了球员 {player_data['name']} ({position})", flush=True)
-    
-    emit('player_selected', {
-        'player_num': player_num,
-        'player_data': player_data,
-        'position': position,
-        'room_state': room.to_dict()
-    }, room=room_id)
+    try:
+        room_id = data.get('room_id')
+        player_num = str(data.get('player_num'))  # 确保是字符串
+        player_data = data.get('player_data')
+        position = data.get('position')
+        
+        print(f"[房间] 收到 select_player 事件: room={room_id}, player={player_num}, position={position}", flush=True)
+        
+        if room_id not in rooms:
+            print(f"[房间] 错误: 房间 {room_id} 不存在", flush=True)
+            emit('error', {'message': '房间不存在'})
+            return
+        
+        room = rooms[room_id]
+        
+        if room.game_state['current_player'] != player_num:
+            print(f"[房间] 错误: 当前玩家是 {room.game_state['current_player']}，不是 {player_num}", flush=True)
+            emit('error', {'message': '还没轮到你操作'})
+            return
+        
+        # 更新阵容
+        room.game_state['teams'][player_num][position] = player_data
+        room.game_state['budgets'][player_num] -= player_data['cost']
+        
+        # 检查是否选满了
+        team1_count = len(room.game_state['teams']['1'])
+        team2_count = len(room.game_state['teams']['2'])
+        both_full = (team1_count == 5 and team2_count == 5)
+        
+        print(f"[房间] 选人后状态: team1={team1_count}/5, team2={team2_count}/5, both_full={both_full}", flush=True)
+        
+        if both_full:
+            room.game_state['phase'] = 'battle'
+            room.game_state['current_player'] = None
+            room.game_state['selection_phase'] = 'draw'
+            print(f"[房间] 双方选满，进入对战阶段", flush=True)
+        else:
+            # 切换到下一个玩家
+            next_player = '2' if player_num == '1' else '1'
+            room.game_state['current_player'] = next_player
+            room.game_state['round'] += 1
+            room.game_state['drawn_team'] = None
+            room.game_state['selection_phase'] = 'draw'  # 重置为抽队伍阶段
+            print(f"[房间] 玩家 {player_num} 选完，切换到玩家 {next_player}，当前轮次 {room.game_state['round']}", flush=True)
+        
+        print(f"[房间] 玩家 {player_num} 选择了球员 {player_data['name']} ({position})", flush=True)
+        
+        # 构建响应数据
+        response_data = {
+            'player_num': player_num,
+            'player_data': player_data,
+            'position': position,
+            'room_state': room.to_dict()
+        }
+        
+        print(f"[房间] 准备广播 player_selected 事件到房间 {room_id}", flush=True)
+        socketio.emit('player_selected', response_data, room=room_id)
+        print(f"[房间] player_selected 事件已广播", flush=True)
+        
+    except Exception as e:
+        import traceback
+        print(f"[房间] handle_select_player 发生错误: {str(e)}", flush=True)
+        traceback.print_exc()
+        emit('error', {'message': f'服务器错误: {str(e)}'})
 
 @socketio.on('skip_turn')
 def handle_skip_turn(data):
@@ -760,7 +916,7 @@ def handle_skip_turn(data):
     
     print(f"[房间] 玩家 {player_num} 跳过了回合", flush=True)
     
-    emit('turn_skipped', {
+    socketio.emit('turn_skipped', {
         'player_num': player_num,
         'room_state': room.to_dict()
     }, room=room_id)
@@ -776,13 +932,86 @@ def handle_request_battle(data):
     room = rooms[room_id]
     
     # 通知房间内所有玩家开始对战
-    emit('battle_ready', {
+    socketio.emit('battle_ready', {
         'teams': room.game_state['teams'],
         'player_names': {
             '1': room.players['1']['name'],
             '2': room.players['2']['name']
         }
     }, room=room_id)
+
+@socketio.on('restart_game')
+def handle_restart_game(data):
+    """处理重新开始游戏请求"""
+    room_id = data.get('room_id')
+    requesting_sid = request.sid
+    
+    print(f"[重新开始] 收到请求: room={room_id}, sid={requesting_sid}", flush=True)
+    
+    if room_id not in rooms:
+        print(f"[重新开始] 错误: 房间 {room_id} 不存在", flush=True)
+        emit('error', {'message': '房间不存在'})
+        return
+    
+    room = rooms[room_id]
+    
+    # 验证请求者是否在房间中
+    requesting_player_num = None
+    for player_num, player_info in room.players.items():
+        if player_info and player_info['sid'] == requesting_sid:
+            requesting_player_num = player_num
+            break
+    
+    if not requesting_player_num:
+        print(f"[重新开始] 错误: 玩家 {requesting_sid} 不在房间 {room_id} 中", flush=True)
+        emit('error', {'message': '您不在该房间中'})
+        return
+    
+    # 重置游戏状态
+    print(f"[重新开始] 重置房间 {room_id} 的游戏状态", flush=True)
+    room.reset_game_state()
+    
+    # 广播给房间内所有玩家
+    socketio.emit('game_restarted', {
+        'message': '游戏已重新开始',
+        'room_state': room.to_dict(),
+        'restarted_by': room.players[requesting_player_num]['name']
+    }, room=room_id)
+    
+    print(f"[重新开始] 房间 {room_id} 游戏已重置，返回选人阶段", flush=True)
+
+@socketio.on('leave_room')
+def handle_leave_room(data):
+    """处理离开房间"""
+    room_id = data.get('room_id')
+    leaving_sid = request.sid
+    
+    print(f"[房间] 玩家主动离开: room={room_id}, sid={leaving_sid}", flush=True)
+    
+    if room_id not in rooms:
+        return
+    
+    room = rooms[room_id]
+    
+    # 找到离开者的玩家信息
+    leaving_player_num = None
+    leaving_player_name = None
+    for player_num, player_info in room.players.items():
+        if player_info and player_info['sid'] == leaving_sid:
+            leaving_player_num = player_num
+            leaving_player_name = player_info['name']
+            break
+    
+    if leaving_player_num:
+        # 通知房间内其他玩家
+        socketio.emit('player_left', {
+            'player_num': leaving_player_num,
+            'message': f"{leaving_player_name} 离开了房间"
+        }, room=room_id)
+        
+        # 删除房间
+        del rooms[room_id]
+        print(f"[房间] 房间 {room_id} 已删除（玩家主动离开）", flush=True)
 
 @socketio.on('start_battle')
 def handle_start_battle(data):
@@ -802,6 +1031,11 @@ def handle_start_battle(data):
         'message': '对战模拟开始'
     }, room=room_id)
     
+    # 在单独的 greenlet 中运行模拟，避免阻塞 WebSocket
+    eventlet.spawn(_run_battle_simulation, room_id, team1, team2, player_names)
+
+def _run_battle_simulation(room_id, team1, team2, player_names):
+    """在后台执行对战模拟"""
     # 构建提示词
     prompt = build_simple_series_prompt(team1, team2, player_names)
     
@@ -875,6 +1109,8 @@ def handle_start_battle(data):
 【重要】你必须严格按照JSON格式返回结果。"""
     
     try:
+        print(f"[对战] 开始调用 DeepSeek API", flush=True)
+        
         # 调用 DeepSeek API
         response = client.chat.completions.create(
             model="deepseek-reasoner",
@@ -897,6 +1133,8 @@ def handle_start_battle(data):
                     'type': 'reasoning',
                     'content': delta.reasoning_content
                 }, room=room_id)
+                # 让出控制权，避免阻塞
+                eventlet.sleep(0)
             elif delta.content:
                 final_content += delta.content
                 # 广播生成内容
@@ -904,6 +1142,8 @@ def handle_start_battle(data):
                     'type': 'content',
                     'content': delta.content
                 }, room=room_id)
+                # 让出控制权，避免阻塞
+                eventlet.sleep(0)
         
         # 解析结果
         result = extract_json(final_content)
@@ -929,12 +1169,30 @@ def handle_start_battle(data):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 7860))
-    print("=" * 50)
-    print("NBA历史球星模拟对战 - 服务器启动")
-    print("=" * 50)
-    print(f"API Key: {'已配置' if DEEPSEEK_API_KEY != 'your-api-key-here' else '未配置'}")
-    print(f"访问地址: http://0.0.0.0:{port}")
-    print("=" * 50)
+    print("=" * 50, flush=True)
+    print("NBA历史球星模拟对战 - 服务器启动", flush=True)
+    print("=" * 50, flush=True)
+    print(f"API Key: {'已配置' if DEEPSEEK_API_KEY != 'your-api-key-here' else '未配置'}", flush=True)
+    print(f"访问地址: http://0.0.0.0:{port}", flush=True)
+    print(f"环境变量 PORT: {os.environ.get('PORT', '未设置')}", flush=True)
+    print(f"Python 版本: {sys.version}", flush=True)
+    print("=" * 50, flush=True)
     
-    socketio.run(app, host='0.0.0.0', port=port, debug=False)
+    try:
+        # Hugging Face Space 生产环境配置
+        # 使用 eventlet 异步模式以支持 WebSocket
+        socketio.run(
+            app, 
+            host='0.0.0.0', 
+            port=port, 
+            debug=False, 
+            allow_unsafe_werkzeug=True,
+            use_reloader=False,
+            log_output=True  # 启用日志输出
+        )
+    except Exception as e:
+        import traceback
+        print(f"[致命错误] 服务器启动失败: {str(e)}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
 

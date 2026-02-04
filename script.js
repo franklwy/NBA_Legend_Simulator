@@ -15,31 +15,206 @@ let socket = null;
 let onlineMode = false;
 let roomId = null;
 let myPlayerNum = null;
+let keepAliveInterval = null; // 保活定时器
 let isReady = false;
+
+// ========================================
+// 联机提示音：轮到我操作时提醒
+// - 不依赖音频文件，使用 Web Audio 生成短提示音
+// - 只在“回合从对方切到我”时触发，并做去重
+// ========================================
+let enableTurnSfx = true;
+let _turnSfxAudioCtx = null;
+let _lastTurnSfxToken = null;
+
+function _ensureTurnSfxAudioCtx() {
+    if (_turnSfxAudioCtx) return _turnSfxAudioCtx;
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return null;
+    _turnSfxAudioCtx = new AudioContextCtor();
+    return _turnSfxAudioCtx;
+}
+
+function _unlockTurnSfxAudio() {
+    const ctx = _ensureTurnSfxAudioCtx();
+    if (!ctx) return;
+    // 某些浏览器需要用户手势后才能 resume
+    if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+    }
+}
+
+function playTurnSfx() {
+    if (!enableTurnSfx) return;
+    const ctx = _ensureTurnSfxAudioCtx();
+    if (!ctx) return;
+
+    // 尝试恢复（如果没被用户手势解锁，可能仍会被阻止，但不会报错影响流程）
+    if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+    }
+
+    try {
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        // “叮”一下：两段频率 + 快速包络
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, now);
+        osc.frequency.exponentialRampToValueAtTime(1320, now + 0.06);
+
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.18, now + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.16);
+    } catch (e) {
+        // 任何音频异常都不应影响游戏
+        console.warn('[SFX] 播放提示音失败:', e);
+    }
+}
+
+function maybePlayMyTurnSfxFromServerEvent(roomState, prevCurrentPlayer, actorPlayerNum) {
+    try {
+        if (!enableTurnSfx) return;
+        if (!onlineMode || !roomId || !myPlayerNum) return;
+        if (!roomState || !roomState.game_state) return;
+
+        const myNum = parseInt(myPlayerNum);
+        const actorNum = actorPlayerNum !== undefined && actorPlayerNum !== null ? parseInt(actorPlayerNum) : null;
+        const gs = roomState.game_state;
+        const newCurrent = gs.current_player !== undefined && gs.current_player !== null ? parseInt(gs.current_player) : null;
+
+        // 只在选人阶段提示，避免对战阶段/恢复状态误响
+        if (gs.phase !== 'selection') return;
+
+        // 只在“对方动作导致回合切到我”时提示
+        if (!actorNum || actorNum === myNum) return;
+        if (newCurrent !== myNum) return;
+        if (prevCurrentPlayer === myNum) return;
+
+        // 去重：同一个房间+同一个回合状态只响一次（应对断线重放/重复广播）
+        const token = `${roomId}:${gs.round}:${gs.selection_phase}:${gs.current_player}`;
+        if (token === _lastTurnSfxToken) return;
+        _lastTurnSfxToken = token;
+
+        playTurnSfx();
+    } catch (e) {
+        console.warn('[SFX] 判断提示音时异常:', e);
+    }
+}
+
+// 重试管理
+let createRoomRetryCount = 0;
+let joinRoomRetryCount = 0;
+const MAX_RETRY_COUNT = 15; // 最多重试15次（适应慢速网络）
+const INITIAL_RETRY_DELAY = 1000; // 初始延迟1秒
 
 // 初始化 Socket.IO 连接
 function initSocket() {
-    if (socket && socket.connected) return;
+    if (socket && socket.connected) {
+        console.log('[WebSocket] 已存在连接，无需重新初始化');
+        return;
+    }
     
+    // 如果正在连接中，不要重复创建
+    if (socket && !socket.disconnected) {
+        console.log('[WebSocket] 连接正在建立中，请稍候...');
+        return;
+    }
+    
+    console.log('[WebSocket] 开始初始化连接...');
     socket = io(API_BASE_URL, {
-        transports: ['websocket', 'polling'],
+        transports: ['polling', 'websocket'],  // 优先使用 polling（兼容公司网络）
         reconnection: true,
         reconnectionDelay: 1000,
-        reconnectionAttempts: 5
+        reconnectionDelayMax: 10000,  // 最大延迟10秒
+        reconnectionAttempts: 20,  // 增加到20次（适应公司网络环境）
+        timeout: 30000,  // 30秒超时（给慢速网络更多时间）
+        path: '/socket.io/',
+        upgrade: false,  // 不尝试升级到 WebSocket（避免触发防火墙）
+        rememberUpgrade: false,
+        forceNew: false
     });
     
     socket.on('connect', () => {
-        console.log('[WebSocket] 已连接到服务器');
+        console.log('[WebSocket] 已连接到服务器, ID:', socket.id);
+        
+        // 启动客户端心跳保活机制（每 30 秒发送一次）
+        startKeepAlive();
+        
+        // 如果在游戏中断开后重连,重新加入房间
+        if (roomId && onlineMode) {
+            console.log('[WebSocket] 重连后尝试恢复房间状态, 房间ID:', roomId);
+            showToast('正在重新连接房间...', 'info');
+            
+            // 请求恢复房间状态
+            socket.emit('rejoin_room', {
+                room_id: roomId,
+                player_num: myPlayerNum
+            });
+        }
     });
     
-    socket.on('disconnect', () => {
-        console.log('[WebSocket] 与服务器断开连接');
-        showToast('与服务器断开连接', 'error');
+    socket.on('disconnect', (reason) => {
+        console.log('[WebSocket] 与服务器断开连接, 原因:', reason);
+        console.log('[WebSocket] 当前房间ID:', roomId, '玩家编号:', myPlayerNum);
+        
+        // 停止心跳保活
+        stopKeepAlive();
+        
+        if (onlineMode && roomId) {
+            showToast('连接断开，正在重新连接...', 'warning');
+        } else {
+            showToast(`与服务器断开连接: ${reason}`, 'error');
+        }
+    });
+    
+    socket.on('reconnect', (attemptNumber) => {
+        console.log('[WebSocket] 重新连接成功, 尝试次数:', attemptNumber);
+        
+        if (onlineMode && roomId) {
+            showToast('重新连接成功，正在恢复游戏...', 'success');
+            // connect 事件会自动触发 rejoin_room
+        } else {
+            showToast('重新连接成功', 'success');
+        }
+    });
+    
+    socket.on('reconnect_attempt', (attemptNumber) => {
+        console.log('[WebSocket] 尝试重新连接...', attemptNumber);
+    });
+    
+    socket.on('reconnect_error', (error) => {
+        console.error('[WebSocket] 重连错误:', error);
+    });
+    
+    socket.on('reconnect_failed', () => {
+        console.error('[WebSocket] 重连失败 - 已达到最大重连次数');
+        showToast('无法连接到服务器，请检查网络后刷新页面', 'error');
+        // 重置重试计数器
+        createRoomRetryCount = 0;
+        joinRoomRetryCount = 0;
     });
     
     socket.on('error', (data) => {
-        console.error('[WebSocket] 错误:', data.message);
-        showToast(data.message, 'error');
+        console.error('[WebSocket] 错误:', data);
+        if (data && data.message) {
+            showToast(data.message, 'error');
+        }
+    });
+    
+    socket.on('connect_error', (error) => {
+        console.error('[WebSocket] 连接错误:', error);
+        // 如果是资源不足错误，给出明确提示
+        if (error && error.message && error.message.includes('Insufficient resources')) {
+            console.error('[WebSocket] 服务器资源不足，可能是 Hugging Face 免费版限制');
+            showToast('服务器繁忙，请稍后重试', 'error');
+        }
     });
     
     // 房间事件
@@ -58,6 +233,41 @@ function initSocket() {
     // 对战模拟事件
     socket.on('battle_started', handleBattleStarted);
     socket.on('battle_stream', handleBattleStream);
+    
+    // 心跳响应
+    socket.on('pong', () => {
+        console.log('[心跳] 收到服务器 pong 响应');
+    });
+    
+    // 游戏重新开始事件
+    socket.on('game_restarted', handleGameRestarted);
+}
+
+// 客户端心跳保活机制
+function startKeepAlive() {
+    // 清除已有的定时器
+    stopKeepAlive();
+    
+    console.log('[心跳] 启动客户端保活机制（每30秒）');
+    
+    // 每 30 秒发送一次 ping
+    keepAliveInterval = setInterval(() => {
+        if (socket && socket.connected) {
+            console.log('[心跳] 发送 ping 保持连接');
+            socket.emit('ping', { timestamp: Date.now() });
+        } else {
+            console.warn('[心跳] Socket 未连接，停止心跳');
+            stopKeepAlive();
+        }
+    }, 30000); // 30 秒
+}
+
+function stopKeepAlive() {
+    if (keepAliveInterval) {
+        console.log('[心跳] 停止客户端保活机制');
+        clearInterval(keepAliveInterval);
+        keepAliveInterval = null;
+    }
 }
 
 // 房间事件处理
@@ -71,10 +281,14 @@ function handleRoomCreated(data) {
 
 function handleRoomJoined(data) {
     console.log('[房间] 已加入房间:', data);
+    console.log('[房间] 我的玩家编号:', data.player_num);
+    console.log('[房间] 房间ID:', data.room_id);
     roomId = data.room_id;
     myPlayerNum = data.player_num;
+    onlineMode = true; // 确保设置在线模式
     updateWaitingRoom(data.room_state);
     showWaitingRoom();
+    showToast(`成功加入房间 ${roomId}`, 'success');
 }
 
 function handlePlayerJoined(data) {
@@ -86,6 +300,13 @@ function handlePlayerJoined(data) {
 function handlePlayerLeft(data) {
     console.log('[房间] 玩家离开:', data);
     showToast(data.message, 'warning');
+    
+    // 隐藏冠军显示（如果有）
+    const championDisplay = document.getElementById('champion-display');
+    if (championDisplay) {
+        championDisplay.classList.add('hidden');
+    }
+    
     // 如果对方离开,回到房间大厅
     if (data.player_num !== myPlayerNum) {
         leaveRoom();
@@ -100,6 +321,69 @@ function handlePlayerReady(data) {
     if (data.room_state.game_state.phase === 'selection') {
         startOnlineGame(data.room_state);
     }
+}
+
+// 重新加入房间（断线恢复）
+function handleRoomRejoined(data) {
+    console.log('[房间] 重新加入成功，恢复游戏状态:', data);
+    
+    if (data.success) {
+        roomId = data.room_id;
+        myPlayerNum = data.player_num;
+        onlineMode = true;
+        
+        // 同步游戏状态
+        if (data.room_state) {
+            const phase = data.room_state.game_state.phase;
+            const gameState = data.room_state.game_state;
+            
+            console.log('[房间] 当前游戏阶段:', phase);
+            console.log('[房间] 完整游戏状态:', gameState);
+            
+            if (phase === 'waiting') {
+                // 还在等待房间
+                updateWaitingRoom(data.room_state);
+                showWaitingRoom();
+                showToast('重新连接成功', 'success');
+            } else if (phase === 'selection') {
+                // 正在选人阶段 - 完整恢复界面
+                console.log('[房间] 恢复选人界面');
+                
+                // 切换到游戏界面
+                hideRoomLobby();
+                
+                // 完整同步游戏状态（包括已选的球员）
+                syncGameState(data.room_state);
+                
+                // 显示当前轮次信息
+                const round = gameState.round;
+                const currentPlayer = gameState.current_player;
+                console.log(`[房间] 当前第 ${round} 轮，轮到玩家 ${currentPlayer}`);
+                
+                showToast(`游戏状态已恢复！当前第 ${round} 轮`, 'success');
+            } else if (phase === 'battle') {
+                // 对战阶段
+                syncGameState(data.room_state);
+                showToast('对战状态已恢复', 'success');
+            }
+        }
+    } else {
+        console.error('[房间] 重新加入失败:', data.message);
+        showToast('无法恢复游戏状态: ' + data.message, 'error');
+        leaveRoom();
+    }
+}
+
+// 其他玩家重连通知
+function handlePlayerReconnected(data) {
+    console.log('[房间] 玩家重新连接:', data);
+    showToast(`${data.player_name} 重新连接`, 'info');
+}
+
+// 其他玩家重连通知
+function handlePlayerReconnected(data) {
+    console.log('[房间] 玩家重新连接:', data);
+    showToast(`${data.player_name} 重新连接`, 'info');
 }
 
 // 游戏事件处理
@@ -120,6 +404,7 @@ function handleTeamSelected(data) {
 function handlePlayerSelected(data) {
     console.log('[游戏] 球员已选择:', data);
     console.log('[游戏] 服务器返回的 current_player:', data.room_state.game_state.current_player);
+    const prevCurrentPlayer = gameState.currentPlayer;
     
     // 隐藏位置选择器
     const selector = document.getElementById('position-selector');
@@ -133,14 +418,21 @@ function handlePlayerSelected(data) {
     
     console.log('[游戏] 同步后 gameState.currentPlayer:', gameState.currentPlayer);
     
+    // 对方选完人后，如果轮到我了，播放提示音
+    maybePlayMyTurnSfxFromServerEvent(data.room_state, prevCurrentPlayer, data.player_num);
+    
     showToast(`${getPlayerName(data.player_num)} 选择了 ${data.player_data.name}`, 'success');
 }
 
 function handleTurnSkipped(data) {
     console.log('[游戏] 回合跳过:', data);
+    const prevCurrentPlayer = gameState.currentPlayer;
     
     // 同步游戏状态
     syncGameState(data.room_state);
+    
+    // 对方跳过后，如果轮到我了，也提示一下
+    maybePlayMyTurnSfxFromServerEvent(data.room_state, prevCurrentPlayer, data.player_num);
     
     showToast(`${getPlayerName(data.player_num)} 跳过了回合`, 'info');
 }
@@ -153,7 +445,7 @@ function handleBattleReady(data) {
 
 // 对战开始事件
 function handleBattleStarted(data) {
-    console.log('[对战] 对战开始:', data);
+    console.log('[对战] 收到 battle_started 事件:', data);
     
     // 禁用按钮，显示状态
     const simulateBtn = document.getElementById('simulate-btn');
@@ -180,11 +472,12 @@ function handleBattleStarted(data) {
     createThinkingBox();
     
     showToast('对战模拟开始，双方都可以看到结果', 'info');
+    console.log('[对战] 界面已更新，等待流式数据...');
 }
 
 // 对战流式数据
 function handleBattleStream(data) {
-    console.log('[对战] 收到流式数据:', data.type);
+    console.log('[对战] 收到 battle_stream 事件, 类型:', data.type, '数据:', data);
     
     if (data.type === 'reasoning') {
         // 更新思考内容
@@ -795,7 +1088,7 @@ function showRoomMode(mode) {
 function startSingleMode() {
     onlineMode = false;
     hideRoomLobby();
-    resetGame();
+    restartGame();
 }
 
 // 创建在线房间
@@ -803,12 +1096,25 @@ function createOnlineRoom() {
     const playerName = document.getElementById('lobby-player-name').value.trim() || '玩家1';
     
     if (!socket || !socket.connected) {
-        showToast('正在连接服务器,请稍候...', 'info');
+        if (createRoomRetryCount >= MAX_RETRY_COUNT) {
+            showToast('无法连接到服务器，请检查网络或稍后重试', 'error');
+            console.error('[房间] 创建房间失败：超过最大重试次数');
+            createRoomRetryCount = 0; // 重置计数器
+            return;
+        }
+        
+        createRoomRetryCount++;
+        const retryDelay = INITIAL_RETRY_DELAY * Math.pow(2, createRoomRetryCount - 1); // 指数退避
+        console.log(`[房间] 服务器未连接，${retryDelay}ms后进行第${createRoomRetryCount}次重试...`);
+        showToast(`正在连接服务器...（尝试 ${createRoomRetryCount}/${MAX_RETRY_COUNT}）`, 'info');
+        
         initSocket();
-        setTimeout(() => createOnlineRoom(), 1000);
+        setTimeout(() => createOnlineRoom(), retryDelay);
         return;
     }
     
+    // 连接成功，重置计数器
+    createRoomRetryCount = 0;
     socket.emit('create_room', { player_name: playerName });
 }
 
@@ -823,21 +1129,42 @@ function joinOnlineRoom() {
     }
     
     if (!socket || !socket.connected) {
-        showToast('正在连接服务器,请稍候...', 'info');
+        if (joinRoomRetryCount >= MAX_RETRY_COUNT) {
+            showToast('无法连接到服务器，请检查网络或稍后重试', 'error');
+            console.error('[房间] 加入房间失败：超过最大重试次数');
+            joinRoomRetryCount = 0; // 重置计数器
+            return;
+        }
+        
+        joinRoomRetryCount++;
+        const retryDelay = INITIAL_RETRY_DELAY * Math.pow(2, joinRoomRetryCount - 1); // 指数退避
+        console.log(`[房间] 服务器未连接，${retryDelay}ms后进行第${joinRoomRetryCount}次重试...`);
+        showToast(`正在连接服务器...（尝试 ${joinRoomRetryCount}/${MAX_RETRY_COUNT}）`, 'info');
+        
         initSocket();
-        setTimeout(() => joinOnlineRoom(), 1000);
+        setTimeout(() => joinOnlineRoom(), retryDelay);
         return;
     }
     
+    // 连接成功，重置计数器
+    joinRoomRetryCount = 0;
+    console.log(`[房间] 尝试加入房间: ${roomIdInput}, 玩家名: ${playerName}`);
+    console.log(`[房间] Socket 连接状态: ${socket.connected}, Socket ID: ${socket.id}`);
     socket.emit('join_room', { room_id: roomIdInput, player_name: playerName });
+    console.log('[房间] join_room 事件已发送');
 }
 
 // 显示等待房间
 function showWaitingRoom() {
+    // 隐藏模式选择面板
     document.getElementById('online-mode-panel').style.display = 'none';
     document.getElementById('single-mode-panel').style.display = 'none';
+    // 显示等待房间
     document.getElementById('waiting-room').style.display = 'block';
     document.getElementById('current-room-id').textContent = roomId;
+    // 确保房间大厅可见，游戏主界面隐藏
+    document.getElementById('room-lobby').style.display = 'flex';
+    document.querySelector('.container').style.display = 'none';
 }
 
 // 更新等待房间状态
@@ -891,6 +1218,11 @@ function toggleReady() {
 
 // 离开房间
 function leaveRoom() {
+    if (socket && roomId) {
+        // 通知服务器离开房间
+        socket.emit('leave_room', { room_id: roomId });
+    }
+    
     if (socket) {
         socket.disconnect();
         socket = null;
@@ -901,10 +1233,17 @@ function leaveRoom() {
     isReady = false;
     onlineMode = false;
     
-    // 重置界面
+    // 重置界面 - 显示房间选择界面
     document.getElementById('waiting-room').style.display = 'none';
     document.getElementById('online-mode-panel').style.display = 'block';
     document.getElementById('room-id-input').value = '';
+    showRoomLobby();  // 显示房间选择界面
+    
+    // 隐藏冠军显示
+    const championDisplay = document.getElementById('champion-display');
+    if (championDisplay) {
+        championDisplay.classList.add('hidden');
+    }
     
     showToast('已离开房间', 'info');
 }
@@ -916,6 +1255,12 @@ function startOnlineGame(roomState) {
     // 更新玩家名称
     gameState.playerNames['1'] = roomState.players['1'].name;
     gameState.playerNames['2'] = roomState.players['2'].name;
+    
+    // 清空抽取的球员列表显示
+    const drawnPlayersContainer = document.getElementById('drawn-players');
+    if (drawnPlayersContainer) {
+        drawnPlayersContainer.innerHTML = '';
+    }
     
     // 同步游戏状态
     syncGameState(roomState);
@@ -951,78 +1296,136 @@ function startOnlineGame(roomState) {
 
 // 同步游戏状态
 function syncGameState(roomState) {
-    const gs = roomState.game_state;
-    
-    // 同步游戏阶段
-    if (gs.phase) {
-        gameState.phase = gs.phase;
-    }
-    
-    // 更新当前玩家和回合（保持字符串类型以便与 myPlayerNum 比较）
-    gameState.currentPlayer = gs.current_player ? parseInt(gs.current_player) : 1;
-    gameState.round = gs.round;
-    
-    // 更新预算
-    gameState.players[1].budget = gs.budgets['1'];
-    gameState.players[2].budget = gs.budgets['2'];
-    
-    // 更新已选队伍
-    gameState.players[1].usedTeams = gs.used_teams['1'];
-    gameState.players[2].usedTeams = gs.used_teams['2'];
-    
-    // 更新阵容
-    gameState.players[1].roster = gs.teams['1'];
-    gameState.players[2].roster = gs.teams['2'];
-    
-    // 更新抽取的队伍
-    gameState.drawnTeam = gs.drawn_team;
-    
-    // 同步选择阶段 (服务器用 selection_phase，客户端用 selectionPhase)
-    if (gs.selection_phase) {
-        gameState.selectionPhase = gs.selection_phase;
-    }
-    
-    // 更新 UI
-    updateUI();
-    renderTeamGrid();
-    
-    // 检查是否可以开始对战
-    if (gs.phase === 'battle') {
-        console.log('[同步] 切换到对战阶段');
-        gameState.phase = 'battle';
+    try {
+        console.log('[同步] 开始同步游戏状态:', roomState);
         
-        // 更新阶段指示器
-        document.getElementById('phase-select').classList.remove('active');
-        document.getElementById('phase-battle').classList.add('active');
+        const gs = roomState.game_state;
         
-        // 隐藏选人区域
-        const selectionArea = document.getElementById('selection-area');
-        if (selectionArea) {
-            selectionArea.style.display = 'none';
-            selectionArea.classList.add('hidden');
+        if (!gs) {
+            console.error('[同步] 游戏状态为空');
+            return;
         }
         
-        const turnIndicator = document.getElementById('turn-indicator');
-        if (turnIndicator) {
-            turnIndicator.style.display = 'none';
-            turnIndicator.classList.add('hidden');
+        // 同步游戏阶段
+        if (gs.phase) {
+            gameState.phase = gs.phase;
+            console.log('[同步] 阶段:', gs.phase);
         }
         
-        // 显示对战区域
-        const battleArea = document.getElementById('battle-area');
-        if (battleArea) {
-            battleArea.style.display = 'block';
-            battleArea.classList.remove('hidden');
+        // 更新当前玩家和回合（保持字符串类型以便与 myPlayerNum 比较）
+        // 注意: current_player 可能是 null (对战阶段或等待阶段)
+        if (gs.current_player !== undefined && gs.current_player !== null) {
+            gameState.currentPlayer = parseInt(gs.current_player);
+            console.log('[同步] 当前玩家:', gameState.currentPlayer);
+        } else {
+            gameState.currentPlayer = null;
+            console.log('[同步] 当前玩家: null (对战阶段或等待阶段)');
         }
         
-        // 更新对战界面的玩家名称
-        document.getElementById('battle-player1-name').textContent = getPlayerName(1);
-        document.getElementById('battle-player2-name').textContent = getPlayerName(2);
-        document.getElementById('battle-roster1-title').textContent = `${getPlayerName(1)}阵容`;
-        document.getElementById('battle-roster2-title').textContent = `${getPlayerName(2)}阵容`;
+        gameState.round = gs.round || 0;  // 等待阶段回合为0
+        console.log('[同步] 回合:', gameState.round);
         
-        // 渲染对战阵容
-        renderBattleRosters();
+        // 更新预算
+        if (gs.budgets) {
+            gameState.players[1].budget = gs.budgets['1'] || 11;
+            gameState.players[2].budget = gs.budgets['2'] || 11;
+            console.log('[同步] 预算: P1=', gameState.players[1].budget, ', P2=', gameState.players[2].budget);
+        }
+        
+        // 更新已选队伍
+        if (gs.used_teams) {
+            gameState.players[1].usedTeams = gs.used_teams['1'] || [];
+            gameState.players[2].usedTeams = gs.used_teams['2'] || [];
+            console.log('[同步] 已选队伍: P1=', gameState.players[1].usedTeams.length, ', P2=', gameState.players[2].usedTeams.length);
+        }
+        
+        // 更新阵容并重建 selectedPlayerIds
+        if (gs.teams) {
+            gameState.players[1].roster = gs.teams['1'] || {};
+            gameState.players[2].roster = gs.teams['2'] || {};
+            
+            // 重建 selectedPlayerIds（从双方阵容中收集所有已选球员的ID）
+            gameState.selectedPlayerIds.clear();
+            for (const playerNum of [1, 2]) {
+                const roster = gameState.players[playerNum].roster;
+                for (const position in roster) {
+                    const player = roster[position];
+                    if (player && player.id) {
+                        gameState.selectedPlayerIds.add(player.id);
+                    }
+                }
+            }
+            
+            const p1Count = Object.keys(gameState.players[1].roster).filter(k => gameState.players[1].roster[k] !== null).length;
+            const p2Count = Object.keys(gameState.players[2].roster).filter(k => gameState.players[2].roster[k] !== null).length;
+            console.log('[同步] 阵容: P1=', p1Count, '/5, P2=', p2Count, '/5');
+            console.log('[同步] 已选球员ID数量:', gameState.selectedPlayerIds.size);
+        }
+        
+        // 更新抽取的队伍
+        gameState.drawnTeam = gs.drawn_team || null;
+        console.log('[同步] 抽取的队伍:', gameState.drawnTeam);
+        
+        // 同步选择阶段 (服务器用 selection_phase，客户端用 selectionPhase)
+        if (gs.selection_phase) {
+            gameState.selectionPhase = gs.selection_phase;
+            console.log('[同步] 选择阶段:', gameState.selectionPhase);
+        }
+        
+        // 更新 UI
+        updateUI();
+        renderTeamGrid();
+        console.log('[同步] 同步完成');
+        
+        // 检查是否可以开始对战（移到 try 块内部）
+        if (gs.phase === 'battle') {
+            console.log('[同步] 切换到对战阶段');
+            gameState.phase = 'battle';
+            
+            // 更新阶段指示器
+            document.getElementById('phase-select').classList.remove('active');
+            document.getElementById('phase-battle').classList.add('active');
+            
+            // 隐藏选人区域
+            const selectionArea = document.getElementById('selection-area');
+            if (selectionArea) {
+                selectionArea.style.display = 'none';
+                selectionArea.classList.add('hidden');
+            }
+            
+            const turnIndicator = document.getElementById('turn-indicator');
+            if (turnIndicator) {
+                turnIndicator.style.display = 'none';
+                turnIndicator.classList.add('hidden');
+            }
+            
+            // 显示对战区域
+            const battleArea = document.getElementById('battle-area');
+            if (battleArea) {
+                battleArea.style.display = 'block';
+                battleArea.classList.remove('hidden');
+            }
+            
+            // 更新对战界面的玩家名称
+            document.getElementById('battle-player1-name').textContent = getPlayerName(1);
+            document.getElementById('battle-player2-name').textContent = getPlayerName(2);
+            document.getElementById('battle-roster1-title').textContent = `${getPlayerName(1)}阵容`;
+            document.getElementById('battle-roster2-title').textContent = `${getPlayerName(2)}阵容`;
+            
+            // 渲染对战阵容
+            renderBattleRosters();
+            
+            // 启用模拟按钮
+            const simulateBtn = document.getElementById('simulate-btn');
+            if (simulateBtn) {
+                simulateBtn.disabled = false;
+                simulateBtn.textContent = getTerms().simulateBtn;
+            }
+        }
+        
+    } catch (error) {
+        console.error('[同步] 同步游戏状态时发生错误:', error);
+        showToast('状态同步失败: ' + error.message, 'error');
     }
 }
 
@@ -1033,6 +1436,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // 先显示房间选择界面
     showRoomLobby();
     applyDisplayMode(); // 应用显示模式
+
+    // 尝试解锁音频（用户首次交互后即可播放提示音）
+    document.addEventListener('pointerdown', _unlockTurnSfxAudio, { once: true });
+    document.addEventListener('keydown', _unlockTurnSfxAudio, { once: true });
 });
 
 function initializeGame() {
@@ -1085,6 +1492,24 @@ function getDeptCode(teamId, index) {
         'SAC': 'D26', 'SAS': 'D27', 'TOR': 'D28', 'UTA': 'D29', 'WAS': 'D30'
     };
     return deptCodes[teamId] || `D${String(index + 1).padStart(2, '0')}`;
+}
+
+// 根据球队ID获取球队简称
+function getTeamShortName(teamId) {
+    const team = NBA_TEAMS.find(t => t.id === teamId);
+    if (!team) return teamId;
+    
+    // 提取球队简称（去掉城市名）
+    const shortNames = {
+        'ATL': '老鹰', 'BOS': '凯尔特人', 'BKN': '篮网', 'CHA': '黄蜂', 'CHI': '公牛',
+        'CLE': '骑士', 'DAL': '独行侠', 'DEN': '掘金', 'DET': '活塞', 'GSW': '勇士',
+        'HOU': '火箭', 'IND': '步行者', 'LAC': '快船', 'LAL': '湖人', 'MEM': '灰熊',
+        'MIA': '热火', 'MIL': '雄鹿', 'MIN': '森林狼', 'NOP': '鹈鹕', 'NYK': '尼克斯',
+        'OKC': '雷霆', 'ORL': '魔术', 'PHI': '76人', 'PHX': '太阳', 'POR': '开拓者',
+        'SAC': '国王', 'SAS': '马刺', 'TOR': '猛龙', 'UTA': '爵士', 'WAS': '奇才'
+    };
+    
+    return shortNames[teamId] || team.name;
 }
 
 // 渲染队伍球员列表
@@ -1141,26 +1566,45 @@ function updateUI() {
         gameState.currentPlayer = currentPlayer;
     }
     
-    // 更新回合显示
-    document.getElementById('current-player').textContent = getPlayerName(currentPlayer);
-    document.getElementById('current-player').className = `turn-player player${currentPlayer}`;
-    
-    // 在线模式使用 round，单机模式计算回合数
-    const roundNum = onlineMode ? gameState.round : (Math.floor(gameState.currentTurn / 2) + 1);
-    document.getElementById('round-number').textContent = roundNum;
-    
-    // 更新阶段提示
-    const terms = getTerms();
-    const phaseText = gameState.selectionPhase === 'draw' ? terms.phaseDrawTeam : terms.phasePickPlayer;
-    document.getElementById('phase-text').textContent = phaseText;
+    // 如果 currentPlayer 为 null，说明已经进入对战阶段
+    if (currentPlayer === null || currentPlayer === undefined) {
+        console.log('[UI] currentPlayer 为 null，可能已进入对战阶段');
+        // 不更新回合指示器
+    } else {
+        // 更新回合显示
+        const currentPlayerEl = document.getElementById('current-player');
+        if (currentPlayerEl) {
+            currentPlayerEl.textContent = getPlayerName(currentPlayer);
+            currentPlayerEl.className = `turn-player player${currentPlayer}`;
+        }
+        
+        // 在线模式使用 round，单机模式计算回合数
+        const roundNum = onlineMode ? gameState.round : (Math.floor(gameState.currentTurn / 2) + 1);
+        const roundNumberEl = document.getElementById('round-number');
+        if (roundNumberEl) {
+            roundNumberEl.textContent = roundNum;
+        }
+        
+        // 更新阶段提示
+        const terms = getTerms();
+        const phaseText = gameState.selectionPhase === 'draw' ? terms.phaseDrawTeam : terms.phasePickPlayer;
+        const phaseTextEl = document.getElementById('phase-text');
+        if (phaseTextEl) {
+            phaseTextEl.textContent = phaseText;
+        }
+        
+        // 更新玩家区域高亮
+        const player1Section = document.getElementById('player1-section');
+        const player2Section = document.getElementById('player2-section');
+        if (player1Section) player1Section.classList.toggle('active', currentPlayer === 1);
+        if (player2Section) player2Section.classList.toggle('active', currentPlayer === 2);
+    }
     
     // 更新预算显示
-    document.getElementById('player1-budget').textContent = gameState.players[1].budget;
-    document.getElementById('player2-budget').textContent = gameState.players[2].budget;
-    
-    // 更新玩家区域高亮
-    document.getElementById('player1-section').classList.toggle('active', currentPlayer === 1);
-    document.getElementById('player2-section').classList.toggle('active', currentPlayer === 2);
+    const player1Budget = document.getElementById('player1-budget');
+    const player2Budget = document.getElementById('player2-budget');
+    if (player1Budget) player1Budget.textContent = gameState.players[1].budget;
+    if (player2Budget) player2Budget.textContent = gameState.players[2].budget;
     
     // 更新阵容显示
     updateRosterDisplay(1);
@@ -1169,8 +1613,8 @@ function updateUI() {
     // 更新选择区域显示
     updateSelectionArea();
     
-    // 检查游戏是否结束
-    if (gameState.currentTurn >= 10) {
+    // 检查游戏是否结束（单机模式）
+    if (!onlineMode && gameState.currentTurn >= 10) {
         startBattlePhase();
     }
 }
@@ -1195,8 +1639,15 @@ function updateRosterDisplay(playerNum) {
     const roster = gameState.players[playerNum].roster;
     const container = document.getElementById(`player${playerNum}-roster`);
     
-    Object.keys(roster).forEach(position => {
+    if (!container) return;
+    
+    // 遍历所有标准位置（确保即使 roster 为空也能清空显示）
+    const allPositions = ['PG', 'SG', 'SF', 'PF', 'C'];
+    
+    allPositions.forEach(position => {
         const slot = container.querySelector(`[data-position="${position}"]`);
+        if (!slot) return;
+        
         const player = roster[position];
         
         if (player) {
@@ -1220,8 +1671,8 @@ function updateRosterDisplay(playerNum) {
     if (usedTeamsContainer) {
         const usedTeams = gameState.players[playerNum].usedTeams;
         usedTeamsContainer.innerHTML = usedTeams.map((teamId, idx) => {
-            const deptCode = getDeptCode(teamId, idx);
-            return `<span class="used-team-badge">${deptCode}</span>`;
+            const teamShortName = getTeamShortName(teamId);
+            return `<span class="used-team-badge">${teamShortName}</span>`;
         }).join('');
     }
 }
@@ -1427,7 +1878,26 @@ function addCustomPlayer() {
         isCustom: true // 标记为自定义球员
     };
     
-    // 分配球员
+    // 在线模式：通过 WebSocket 同步
+    if (onlineMode && socket) {
+        socket.emit('select_player', {
+            room_id: roomId,
+            player_num: myPlayerNum,
+            player_data: customPlayer,
+            position: position
+        });
+        
+        // 清除输入框
+        seasonInput.value = '';
+        nameInput.value = '';
+        nameEnInput.value = '';
+        scoreInput.value = '1';
+        positionSelect.value = '';
+        
+        return;
+    }
+    
+    // 单机模式：本地处理
     const currentPlayerNum = gameState.currentPlayer;
     roster[position] = customPlayer;
     gameState.players[currentPlayerNum].budget -= cost;
@@ -1617,6 +2087,13 @@ function startBattlePhase() {
     };
     
     updateBattleScore();
+    
+    // 启用模拟按钮
+    const simulateBtn = document.getElementById('simulate-btn');
+    if (simulateBtn) {
+        simulateBtn.disabled = false;
+        simulateBtn.textContent = getTerms().simulateBtn;
+    }
 }
 
 // 渲染对战阵容
@@ -1687,12 +2164,26 @@ async function simulateSeries() {
     // 在线模式：通过 WebSocket 请求，结果会广播给双方
     if (onlineMode && socket && roomId) {
         console.log('[对战] 在线模式：通过 WebSocket 请求对战模拟');
+        console.log('[对战] Socket 连接状态:', socket.connected);
+        console.log('[对战] 房间ID:', roomId);
+        console.log('[对战] 玩家1阵容:', team1Data);
+        console.log('[对战] 玩家2阵容:', team2Data);
+        
+        if (!socket.connected) {
+            showToast('WebSocket 未连接，请刷新页面重试', 'error');
+            simulateBtn.disabled = false;
+            simulateBtn.textContent = '开始模拟';
+            return;
+        }
+        
         socket.emit('start_battle', {
             room_id: roomId,
             team1: team1Data,
             team2: team2Data,
             playerNames: gameState.playerNames
         });
+        
+        console.log('[对战] 已发送 start_battle 事件');
         return; // 等待服务器广播结果
     }
     
@@ -2167,6 +2658,7 @@ function showChampion(winner, fmvp = null) {
     if (fmvp) {
         championText += `<br><span class="fmvp-badge">${getTerms().bestEmployeeBadge}: ${fmvp.name}</span>`;
     }
+    
     championName.innerHTML = championText;
     championDisplay.classList.remove('hidden');
     
@@ -2175,6 +2667,83 @@ function showChampion(winner, fmvp = null) {
     championDisplay.onclick = () => {
         championDisplay.classList.add('hidden');
     };
+}
+
+// 处理游戏重新开始（服务器广播）
+function handleGameRestarted(data) {
+    console.log('[重新开始] 收到服务器重置通知:', data);
+    
+    // 隐藏冠军显示
+    const championDisplay = document.getElementById('champion-display');
+    if (championDisplay) {
+        championDisplay.classList.add('hidden');
+    }
+    
+    // 完全重置游戏状态但保持房间信息
+    gameState.phase = 'waiting';  // 重置为等待阶段，需要双方重新准备
+    gameState.currentPlayer = null;
+    gameState.currentTurn = 0;
+    gameState.round = 0;
+    gameState.selectionPhase = 'draw';
+    gameState.drawnTeam = null;
+    gameState.selectedPlayerIds = new Set();  // 重新创建 Set
+    gameState.pendingPlayer = null;
+    
+    gameState.players = {
+        1: { budget: 11, roster: { PG: null, SG: null, SF: null, PF: null, C: null }, usedTeams: [] },
+        2: { budget: 11, roster: { PG: null, SG: null, SF: null, PF: null, C: null }, usedTeams: [] }
+    };
+    
+    gameState.battle = { team1Wins: 0, team2Wins: 0, gamesPlayed: 0 };
+    
+    // 清空队伍展示区域
+    const drawnPlayersContainer = document.getElementById('drawn-players');
+    if (drawnPlayersContainer) {
+        drawnPlayersContainer.innerHTML = '';
+    }
+    
+    // 隐藏游戏界面，显示等待房间
+    document.getElementById('phase-select').classList.remove('active');
+    document.getElementById('phase-battle').classList.remove('active');
+    document.getElementById('battle-area').style.display = 'none';
+    document.getElementById('battle-area').classList.add('hidden');
+    document.getElementById('selection-area').style.display = 'none';
+    document.getElementById('selection-area').classList.add('hidden');
+    document.getElementById('turn-indicator').style.display = 'none';
+    document.getElementById('turn-indicator').classList.add('hidden');
+    
+    // 显示等待房间
+    showWaitingRoom();
+    
+    // 重置按钮状态
+    const simulateBtn = document.getElementById('simulate-btn');
+    if (simulateBtn) {
+        simulateBtn.disabled = true;
+        simulateBtn.textContent = '开始绩效评估';
+    }
+    
+    // 清空对战日志
+    const logContent = document.getElementById('log-content');
+    if (logContent) {
+        logContent.innerHTML = '';
+    }
+    
+    // 重置比分显示
+    const team1Wins = document.getElementById('team1-wins');
+    const team2Wins = document.getElementById('team2-wins');
+    if (team1Wins) team1Wins.textContent = '0';
+    if (team2Wins) team2Wins.textContent = '0';
+    
+    // 同步服务器的游戏状态（重置后的状态）
+    if (data.room_state) {
+        // 更新等待房间状态
+        updateWaitingRoom(data.room_state);
+    }
+    
+    // 再次确保 selectedPlayerIds 被清空
+    gameState.selectedPlayerIds.clear();
+    
+    showToast(`游戏已重新开始！请双方重新准备`, 'success');
 }
 
 // 生成彩带效果
@@ -2197,6 +2766,15 @@ function createConfetti() {
 
 // 重新开始游戏
 function restartGame() {
+    // 在线模式：发送重新开始请求到服务器
+    if (onlineMode && socket && roomId) {
+        console.log('[重新开始] 发送请求到服务器');
+        socket.emit('restart_game', { room_id: roomId });
+        showToast('已发送重新开始请求...', 'info');
+        return;
+    }
+    
+    // 单机模式：本地重置
     gameState.phase = 'selection';
     gameState.currentPlayer = 1;
     gameState.currentTurn = 0;

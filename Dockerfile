@@ -17,5 +17,9 @@ COPY --chown=user . /app
 # Hugging Face Space需要监听7860端口
 ENV PORT=7860
 
-CMD ["python", "server.py"]
+# 设置环境变量以优化性能
+ENV PYTHONUNBUFFERED=1
+ENV EVENTLET_HUB=poll
+
+CMD ["python", "-u", "server.py"]
 
